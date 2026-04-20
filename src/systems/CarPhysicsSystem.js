@@ -9,6 +9,7 @@ export class CarPhysicsSystem {
       grip: 1.0,
       maxSpeed: 1.0
     };
+    this.wheelSteeringAngle = 0; // Wheel steering angle from visual wheels
   }
 
   init(engine) {
@@ -25,6 +26,10 @@ export class CarPhysicsSystem {
       steering: 0,
       angularVelocity: 0
     };
+  }
+  
+  setWheelSteeringAngle(angle) {
+    this.wheelSteeringAngle = angle;
   }
 
   setDrivetrain(drivetrain) {
@@ -46,12 +51,9 @@ export class CarPhysicsSystem {
     const effectiveMaxSpeed = PHYSICS.MAX_SPEED * this.balanceModifiers.maxSpeed;
     const effectiveFriction = PHYSICS.FRICTION * this.balanceModifiers.grip;
 
-    // Steering smoothing
-    const targetSteer =
-      input.left ? -PHYSICS.MAX_STEER :
-      input.right ? PHYSICS.MAX_STEER : 0;
-
-    this.car.steering += (targetSteer - this.car.steering) * 0.3;
+    // Use wheel steering angle for movement (from visual wheels)
+    // Don't calculate internal steering - use the wheel angle directly
+    this.car.steering = this.wheelSteeringAngle;
 
     // Acceleration based on drivetrain
     let accelMultiplier = 1.0;
@@ -75,7 +77,7 @@ export class CarPhysicsSystem {
     this.car.x += Math.cos(this.car.angle) * this.car.velocity * dt;
     this.car.y += Math.sin(this.car.angle) * this.car.velocity * dt;
 
-    // Rotation (bicycle model with drivetrain influence)
+    // Rotation using wheel steering angle (bicycle model)
     let turnMultiplier = 1.0;
     if (this.drivetrain === DRIVETRAIN.FWD) {
       // FWD: more responsive steering at low speeds

@@ -21,12 +21,15 @@ export class GameScene extends Phaser.Scene {
     this.timeElapsed = 0;
     this.gameState = 'playing'; // playing, won, failed
     this.difficulty = 0;
+    this.currentSteerAngle = 0; // Current steering angle for gradual animation
+    this.showBoundingBoxes = false; // Bounding boxes toggle (default OFF)
   }
 
   preload() {
     // Load BMW car assets
-    this.load.image('bmw_m2', '/assets/packs/bmw_m2_topdown.png');
-    this.load.image('bmw_5', '/assets/packs/bmw_5_topdown.png');
+    this.load.image('bmw_m2', 'assets/packs/bmw_m2_topdown.png');
+    this.load.image('bmw_5', 'assets/packs/bmw_5_topdown.png');
+    this.load.image('bmw_wheel', 'assets/packs/bmw_wheel_topdown.png');
   }
 
   create() {
@@ -625,6 +628,54 @@ export class GameScene extends Phaser.Scene {
     this.carGraphics = this.add.sprite(carState.x, carState.y, 'bmw_m2');
     this.carGraphics.setScale(0.18); // Increased scale for larger parking spaces
     this.carGraphics.setRotation(Math.PI / 2); // Rotate 90 degrees to face right (sprite faces up, physics angle 0 is right)
+    this.carGraphics.setDepth(1); // Render above wheels
+    
+    // Create 4 wheels for the player car
+    const wheelScale = 0.02373046875; // 25% smaller (0.031640625 * 0.75)
+    
+    // Calculate car sprite dimensions after scaling
+    const carWidth = this.carGraphics.width * this.carGraphics.scaleX;
+    const carHeight = this.carGraphics.height * this.carGraphics.scaleY;
+    
+    // Position wheels closer to center in width, farther in height
+    // Car faces right (angle 0 = right in physics, sprite rotated 90°)
+    // Y axis = front/back, X axis = left/right in sprite coordinates
+    // Front wheels at 20% from front (negative Y)
+    // Rear wheels at 20% from back (positive Y)
+    const frontOffset = -carHeight / 2 + (carHeight * 0.20); // 20% from front
+    const rearOffset = carHeight / 2 - (carHeight * 0.20); // 20% from back
+    const sideOffset = carWidth / 2 * 0.8; // 80% of half-width (slightly more to sides)
+    
+    // Store wheel offsets for positioning
+    // X offset = left/right position, Y offset = front/back position
+    this.wheelOffsets = {
+      frontLeft: { x: -sideOffset, y: frontOffset },
+      frontRight: { x: sideOffset, y: frontOffset },
+      rearLeft: { x: -sideOffset, y: rearOffset },
+      rearRight: { x: sideOffset, y: rearOffset }
+    };
+    
+    // Front wheels (will rotate when steering)
+    this.wheelFrontLeft = this.add.sprite(carState.x, carState.y, 'bmw_wheel');
+    this.wheelFrontLeft.setScale(wheelScale);
+    this.wheelFrontLeft.setRotation(Math.PI / 2);
+    this.wheelFrontLeft.setDepth(0); // Render below car
+    
+    this.wheelFrontRight = this.add.sprite(carState.x, carState.y, 'bmw_wheel');
+    this.wheelFrontRight.setScale(wheelScale);
+    this.wheelFrontRight.setRotation(Math.PI / 2);
+    this.wheelFrontRight.setDepth(0); // Render below car
+    
+    // Rear wheels (don't rotate with steering)
+    this.wheelRearLeft = this.add.sprite(carState.x, carState.y, 'bmw_wheel');
+    this.wheelRearLeft.setScale(wheelScale);
+    this.wheelRearLeft.setRotation(Math.PI / 2);
+    this.wheelRearLeft.setDepth(0); // Render below car
+    
+    this.wheelRearRight = this.add.sprite(carState.x, carState.y, 'bmw_wheel');
+    this.wheelRearRight.setScale(wheelScale);
+    this.wheelRearRight.setRotation(Math.PI / 2);
+    this.wheelRearRight.setDepth(0); // Render below car
     
     // Obstacles (parked cars) - use BMW 5
     this.obstacles = [];
@@ -656,6 +707,7 @@ export class GameScene extends Phaser.Scene {
     }
     carBox.closePath();
     carBox.strokePath();
+    carBox.setVisible(false); // Hidden by default
     this.carBoundingBoxGraphics = carBox;
     
     // Draw obstacle bounding boxes (rotated)
@@ -677,6 +729,7 @@ export class GameScene extends Phaser.Scene {
       }
       obsBox.closePath();
       obsBox.strokePath();
+      obsBox.setVisible(false); // Hidden by default
       this.obstacleBoundingBoxGraphics.push(obsBox);
     }
   }
@@ -719,6 +772,16 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  updateBoundingBoxVisibility() {
+    // Toggle car bounding box visibility
+    this.carBoundingBoxGraphics.setVisible(this.showBoundingBoxes);
+    
+    // Toggle obstacle bounding boxes visibility
+    for (const obsBox of this.obstacleBoundingBoxGraphics) {
+      obsBox.setVisible(this.showBoundingBoxes);
+    }
+  }
+  
   setupUI() {
     // Score display
     this.scoreText = this.add.text(10, 10, '', {
@@ -775,8 +838,14 @@ export class GameScene extends Phaser.Scene {
     }).setOrigin(0.5);
     this.resultText.setVisible(false);
     
-    // Restart key - use one-time listener to prevent multiple restarts
-    this.input.keyboard.once('keydown-R', () => this.restart());
+    // Restart key - use regular listener for multiple restarts
+    this.input.keyboard.on('keydown-R', () => this.restart());
+    
+    // Toggle bounding boxes with B key
+    this.input.keyboard.on('keydown-B', () => {
+      this.showBoundingBoxes = !this.showBoundingBoxes;
+      this.updateBoundingBoxVisibility();
+    });
   }
 
   update(time, delta) {
@@ -987,10 +1056,70 @@ export class GameScene extends Phaser.Scene {
   updateGraphics() {
     const physics = this.engine.getSystem('CarPhysicsSystem');
     const carState = physics.getCarState();
+    const inputSystem = this.engine.getSystem('InputSystem');
+    const input = inputSystem.getInput();
     
     // Update car position and rotation (add PI/2 offset for sprite orientation)
     this.carGraphics.setPosition(carState.x, carState.y);
     this.carGraphics.rotation = carState.angle + Math.PI / 2;
+    
+    // Update wheel steering angle in physics system
+    physics.setWheelSteeringAngle(this.currentSteerAngle);
+    
+    // Update wheel positions based on car position and rotation
+    const carRotation = carState.angle + Math.PI / 2;
+    
+    // Calculate wheel positions using rotation
+    const cos = Math.cos(carRotation);
+    const sin = Math.sin(carRotation);
+    
+    // Front left wheel
+    const flX = carState.x + (this.wheelOffsets.frontLeft.x * cos - this.wheelOffsets.frontLeft.y * sin);
+    const flY = carState.y + (this.wheelOffsets.frontLeft.x * sin + this.wheelOffsets.frontLeft.y * cos);
+    this.wheelFrontLeft.setPosition(flX, flY);
+    
+    // Front right wheel
+    const frX = carState.x + (this.wheelOffsets.frontRight.x * cos - this.wheelOffsets.frontRight.y * sin);
+    const frY = carState.y + (this.wheelOffsets.frontRight.x * sin + this.wheelOffsets.frontRight.y * cos);
+    this.wheelFrontRight.setPosition(frX, frY);
+    
+    // Rear left wheel
+    const rlX = carState.x + (this.wheelOffsets.rearLeft.x * cos - this.wheelOffsets.rearLeft.y * sin);
+    const rlY = carState.y + (this.wheelOffsets.rearLeft.x * sin + this.wheelOffsets.rearLeft.y * cos);
+    this.wheelRearLeft.setPosition(rlX, rlY);
+    
+    // Rear right wheel
+    const rrX = carState.x + (this.wheelOffsets.rearRight.x * cos - this.wheelOffsets.rearRight.y * sin);
+    const rrY = carState.y + (this.wheelOffsets.rearRight.x * sin + this.wheelOffsets.rearRight.y * cos);
+    this.wheelRearRight.setPosition(rrX, rrY);
+    
+    // Update wheel rotations - rear wheels follow car, front wheels rotate with steering
+    this.wheelRearLeft.rotation = carRotation;
+    this.wheelRearRight.rotation = carRotation;
+    
+    // Front wheel steering - gradual animation
+    const maxSteerAngle = 40 * Math.PI / 180; // 40 degrees in radians
+    const steerSpeed = 10; // Speed of steering animation (radians per second)
+    const dt = 1 / 60; // Assume 60fps for steering animation
+    
+    let targetSteerAngle = this.currentSteerAngle; // Default: keep current angle
+    
+    if (input.left) {
+      targetSteerAngle = -maxSteerAngle;
+    } else if (input.right) {
+      targetSteerAngle = maxSteerAngle;
+    }
+    
+    // Gradually interpolate current steering angle towards target
+    if (this.currentSteerAngle < targetSteerAngle) {
+      this.currentSteerAngle = Math.min(this.currentSteerAngle + steerSpeed * dt, targetSteerAngle);
+    } else if (this.currentSteerAngle > targetSteerAngle) {
+      this.currentSteerAngle = Math.max(this.currentSteerAngle - steerSpeed * dt, targetSteerAngle);
+    }
+    
+    // Front wheels rotate with car angle plus steering
+    this.wheelFrontLeft.rotation = carRotation + this.currentSteerAngle;
+    this.wheelFrontRight.rotation = carRotation + this.currentSteerAngle;
     
     // Update bounding boxes
     this.updateBoundingBoxes();
@@ -1041,6 +1170,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   restart() {
+    // Reset wheel steering angle
+    this.currentSteerAngle = 0;
     // Reset scene
     this.scene.restart();
   }
