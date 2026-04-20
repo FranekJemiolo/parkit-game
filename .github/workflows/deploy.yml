@@ -1,0 +1,42 @@
+name: Build & Deploy (Main)
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm install
+
+      - name: Validate project
+        run: node tools/validate.js
+
+      - name: Run unit tests
+        run: node tests/testRunner.js
+
+      - name: Run fuzz tests
+        run: node tests/fuzz/seed-fuzzer.js 500 > fuzz-output.json
+
+      - name: Build production bundle
+        run: node tools/build.js
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist

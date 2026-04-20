@@ -1,0 +1,39 @@
+name: Versioned Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm install
+
+      - name: Run full validation suite
+        run: |
+          node tools/validate.js
+          node tests/testRunner.js
+          node tests/fuzz/seed-fuzzer.js 1000
+
+      - name: Build production bundle
+        run: node tools/build.js
+
+      - name: Create release artifact
+        run: zip -r build-${{ github.ref_name }}.zip dist
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: build-${{ github.ref_name }}.zip

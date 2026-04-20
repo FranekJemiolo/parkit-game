@@ -1,0 +1,25 @@
+{
+  "name": "parkit-game",
+  "version": "1.0.0",
+  "description": "Deterministic procedural parking roguelite game engine",
+  "main": "index.html",
+  "scripts": {
+    "test": "node tests/testRunner.js",
+    "fuzz": "node tests/fuzz/seed-fuzzer.js",
+    "analyze": "node tools/balance-analyzer.js",
+    "build": "node tools/build.js",
+    "validate": "node tools/validate.js"
+  },
+  "keywords": [
+    "parking",
+    "game",
+    "procedural",
+    "phaser",
+    "deterministic"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "phaser": "^3.70.0"
+  }
+}
