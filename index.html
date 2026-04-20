@@ -1,0 +1,2632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ParkIt - Procedural Parking Roguelite</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      background: #111;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    
+    #game-container {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container"></div>
+  
+  <!-- Load Phaser as a regular script (not ES module) -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.70.0/dist/phaser.min.js"></script>
+  
+  <script>
+// === config/constants.js ===
+const PHYSICS = {
+  MAX_SPEED: 1200,
+  ACCEL: 1600,
+  BRAKE: 1000,
+  FRICTION: 0.985,
+  WHEELBASE: 35,
+  MAX_STEER: 0.8
+};
+
+const FUEL = {
+  BASE: 130,
+  DIFFICULTY_BONUS: 90,
+  MOVE_FACTOR: 0.08,
+  STEER_FACTOR: 0.03,
+  REVERSE_MULTIPLIER: 1.45,
+  HARD_FAIL: false
+};
+
+const SCORING = {
+  POSITION_WEIGHT: 0.6,
+  ANGLE_WEIGHT: 0.4,
+  POS_K: 2.0,
+  ANGLE_K: 3.0
+};
+
+const GAME = {
+  LEVELS_TO_MAX_DIFFICULTY: 20,
+  MOVE_THRESHOLD_STEER: 0.35,
+  MOVE_THRESHOLD_THROTTLE: 0.2,
+  FPS: 60
+};
+
+const CAR = {
+  WIDTH: 25,
+  LENGTH: 50,
+  SAFE_MARGIN: 5
+};
+
+const DRIVETRAIN = {
+  FWD: 'FWD',
+  RWD: 'RWD',
+  AWD: 'AWD'
+};
+
+const SEASONS = {
+  SUMMER: 'summer',
+  WINTER: 'winter',
+  RAIN: 'rain'
+};
+
+const DIRECTOR_PERSONALITIES = {
+  FLOW: 'flow',
+  CHAOS: 'chaos',
+  TEACHER: 'teacher',
+  RIVAL: 'rival'
+};
+
+
+// === core/utils.js ===
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+// Seeded RNG - Mulberry32
+function createRNG(seed) {
+  return function() {
+    seed |= 0;
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t ^= t + Math.imul(t ^ seed >>> 7, 61 | t);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function angleDiff(a, b) {
+  const diff = Math.abs(a - b);
+  return diff > Math.PI ? 2 * Math.PI - diff : diff;
+}
+
+
+// === core/Engine.js ===
+
+class Engine {
+  constructor(config = {}) {
+    this.systems = [];
+    this.config = config;
+    this.running = false;
+    this.lastTime = 0;
+    this.seed = config.seed || Date.now();
+    this.rng = null;
+  }
+
+  registerSystem(system) {
+    this.systems.push(system);
+    return this;
+  }
+
+  init() {
+    this.rng = createRNG(this.seed);
+    
+    // Initialize all systems
+    for (const system of this.systems) {
+      if (system.init) {
+        system.init(this);
+      }
+    }
+  }
+
+  start() {
+    this.running = true;
+    this.lastTime = performance.now();
+    this.loop(this.lastTime);
+  }
+
+  stop() {
+    this.running = false;
+  }
+
+  loop(timestamp) {
+    if (!this.running) return;
+
+    const dt = (timestamp - this.lastTime) / 1000;
+    this.lastTime = timestamp;
+
+    // Update all systems
+    for (const system of this.systems) {
+      if (system.update) {
+        system.update(dt);
+      }
+    }
+
+    requestAnimationFrame((t) => this.loop(t));
+  }
+
+  getSystem(name) {
+    return this.systems.find(s => s.constructor.name === name);
+  }
+}
+
+
+// === systems/InputSystem.js ===
+class InputSystem {
+  constructor() {
+    this.input = {
+      up: false,
+      down: false,
+      left: false,
+      right: false,
+      brake: false
+    };
+    this.lastInput = { ...this.input };
+  }
+
+  init(engine) {
+    this.engine = engine;
+    this.bindInput();
+  }
+
+  bindInput() {
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'w') this.input.up = true;
+      if (e.key === 'ArrowDown' || e.key === 's') this.input.down = true;
+      if (e.key === 'ArrowLeft' || e.key === 'a') this.input.left = true;
+      if (e.key === 'ArrowRight' || e.key === 'd') this.input.right = true;
+      if (e.key === 'Shift') this.input.brake = true;
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'w') this.input.up = false;
+      if (e.key === 'ArrowDown' || e.key === 's') this.input.down = false;
+      if (e.key === 'ArrowLeft' || e.key === 'a') this.input.left = false;
+      if (e.key === 'ArrowRight' || e.key === 'd') this.input.right = false;
+      if (e.key === 'Shift') this.input.brake = false;
+    });
+  }
+
+  update(dt) {
+    // Input state is updated by event listeners
+  }
+
+  hasChanged() {
+    return (
+      this.input.up !== this.lastInput.up ||
+      this.input.down !== this.lastInput.down ||
+      this.input.left !== this.lastInput.left ||
+      this.input.right !== this.lastInput.right ||
+      this.input.brake !== this.lastInput.brake
+    );
+  }
+
+  snapshot() {
+    this.lastInput = { ...this.input };
+  }
+
+  getInput() {
+    return { ...this.input };
+  }
+}
+
+
+// === systems/CarPhysicsSystem.js ===
+
+
+class CarPhysicsSystem {
+  constructor() {
+    this.car = null;
+    this.drivetrain = DRIVETRAIN.FWD;
+    this.balanceModifiers = {
+      grip: 1.0,
+      maxSpeed: 1.0
+    };
+  }
+
+  init(engine) {
+    this.engine = engine;
+    this.resetCar();
+  }
+
+  resetCar(startPose = { x: 400, y: 300, angle: 0 }) {
+    this.car = {
+      x: startPose.x,
+      y: startPose.y,
+      angle: startPose.angle,
+      velocity: 0,
+      steering: 0,
+      angularVelocity: 0
+    };
+  }
+
+  setDrivetrain(drivetrain) {
+    this.drivetrain = drivetrain;
+  }
+
+  applyBalanceModifiers(modifiers) {
+    if (modifiers.grip !== undefined) {
+      this.balanceModifiers.grip = modifiers.grip;
+    }
+    if (modifiers.maxSpeed !== undefined) {
+      this.balanceModifiers.maxSpeed = modifiers.maxSpeed;
+    }
+  }
+
+  update(dt, input) {
+    if (!this.car) return;
+
+    const effectiveMaxSpeed = PHYSICS.MAX_SPEED * this.balanceModifiers.maxSpeed;
+    const effectiveFriction = PHYSICS.FRICTION * this.balanceModifiers.grip;
+
+    // Steering smoothing
+    const targetSteer =
+      input.left ? -PHYSICS.MAX_STEER :
+      input.right ? PHYSICS.MAX_STEER : 0;
+
+    this.car.steering += (targetSteer - this.car.steering) * 0.3;
+
+    // Acceleration based on drivetrain
+    let accelMultiplier = 1.0;
+    if (this.drivetrain === DRIVETRAIN.RWD) {
+      // RWD: more aggressive acceleration, harder to control
+      accelMultiplier = 1.1;
+    } else if (this.drivetrain === DRIVETRAIN.AWD) {
+      // AWD: more stable, consistent acceleration
+      accelMultiplier = 0.95;
+    }
+
+    if (input.up) this.car.velocity += PHYSICS.ACCEL * accelMultiplier * dt;
+    if (input.down) this.car.velocity -= PHYSICS.BRAKE * dt;
+    if (input.brake) this.car.velocity *= 0.9;
+
+    // Friction
+    this.car.velocity *= effectiveFriction;
+    this.car.velocity = clamp(this.car.velocity, -effectiveMaxSpeed, effectiveMaxSpeed);
+
+    // Movement
+    this.car.x += Math.cos(this.car.angle) * this.car.velocity * dt;
+    this.car.y += Math.sin(this.car.angle) * this.car.velocity * dt;
+
+    // Rotation (bicycle model with drivetrain influence)
+    let turnMultiplier = 1.0;
+    if (this.drivetrain === DRIVETRAIN.FWD) {
+      // FWD: more responsive steering at low speeds
+      turnMultiplier = 1.1;
+    } else if (this.drivetrain === DRIVETRAIN.RWD) {
+      // RWD: more oversteer tendency
+      turnMultiplier = 1.15;
+    } else if (this.drivetrain === DRIVETRAIN.AWD) {
+      // AWD: more stable turning
+      turnMultiplier = 1.0;
+    }
+
+    this.car.angle += (this.car.velocity / PHYSICS.WHEELBASE) * 
+                     Math.tan(this.car.steering) * turnMultiplier * dt;
+  }
+
+  getCarState() {
+    return { ...this.car };
+  }
+
+  setCarState(state) {
+    this.car = { ...state };
+  }
+}
+
+
+// === systems/ParkingSystem.js ===
+
+
+class ParkingSystem {
+  constructor() {
+    this.parkingSpot = null;
+    this.toleranceMultiplier = 1.0;
+  }
+
+  init(engine) {
+    this.engine = engine;
+  }
+
+  setParkingSpot(spot) {
+    this.parkingSpot = spot;
+  }
+
+  setTolerance(multiplier) {
+    this.toleranceMultiplier = multiplier;
+  }
+
+  evaluateParking(car) {
+    if (!this.parkingSpot) return null;
+
+    const dx = car.x - this.parkingSpot.x;
+    const dy = car.y - this.parkingSpot.y;
+    const posError = Math.sqrt(dx * dx + dy * dy);
+    const angleError = angleDiff(car.angle, this.parkingSpot.angle);
+
+    const effectivePosK = SCORING.POS_K / this.toleranceMultiplier;
+    const effectiveAngK = SCORING.ANGLE_K / this.toleranceMultiplier;
+
+    const positionScore = Math.max(0, 100 - posError * effectivePosK);
+    const angleScore = Math.max(0, 100 - angleError * effectiveAngK);
+
+    const total = positionScore * SCORING.POSITION_WEIGHT + 
+                  angleScore * SCORING.ANGLE_WEIGHT;
+
+    return {
+      positionScore,
+      angleScore,
+      total,
+      posError,
+      angleError
+    };
+  }
+
+  checkWin(car, evaluation) {
+    if (!evaluation) return false;
+
+    const posThreshold = (CAR.LENGTH / 2) * this.toleranceMultiplier;
+    const angleThreshold = 0.2 * this.toleranceMultiplier;
+
+    return (
+      evaluation.posError < posThreshold &&
+      evaluation.angleError < angleThreshold &&
+      Math.abs(car.velocity) < 20
+    );
+  }
+
+  getParkingSpot() {
+    return this.parkingSpot;
+  }
+}
+
+
+// === systems/ScoringSystem.js ===
+
+class ScoringSystem {
+  constructor() {
+    this.moves = 0;
+    this.fuel = FUEL.BASE;
+    this.maxFuel = FUEL.BASE;
+    this.globalMultiplier = 1.0;
+    this.drivetrainMultiplier = 1.0;
+  }
+
+  init(engine) {
+    this.engine = engine;
+  }
+
+  reset(maxFuel = FUEL.BASE) {
+    this.moves = 0;
+    this.fuel = maxFuel;
+    this.maxFuel = maxFuel;
+  }
+
+  incrementMove() {
+    this.moves++;
+  }
+
+  updateFuel(car, input, dt) {
+    const speedCost = Math.abs(car.velocity) * FUEL.MOVE_FACTOR * dt;
+    const steerCost = Math.abs(car.steering) * FUEL.STEER_FACTOR * dt;
+    
+    let reverseCost = 0;
+    if (car.velocity < 0) {
+      reverseCost = speedCost * (FUEL.REVERSE_MULTIPLIER - 1);
+    }
+
+    this.fuel = Math.max(0, this.fuel - (speedCost + steerCost + reverseCost));
+  }
+
+  setDrivetrainMultiplier(drivetrain) {
+    // Different drivetrains have different scoring multipliers
+    switch (drivetrain) {
+      case 'RWD':
+        this.drivetrainMultiplier = 1.2; // Harder = higher score potential
+        break;
+      case 'AWD':
+        this.drivetrainMultiplier = 1.0;
+        break;
+      case 'FWD':
+      default:
+        this.drivetrainMultiplier = 1.1;
+        break;
+    }
+  }
+
+  setGlobalMultiplier(multiplier) {
+    this.globalMultiplier = multiplier;
+  }
+
+  computeFinalScore(parkingEvaluation, time) {
+    // Simplified scoring: just parking quality + small time bonus
+    const baseScore = parkingEvaluation.total * this.drivetrainMultiplier;
+    const timeBonus = Math.max(0, 50 - time); // Small time bonus
+    
+    const finalScore = (baseScore + timeBonus) * this.globalMultiplier;
+
+    return {
+      final: Math.max(0, finalScore),
+      breakdown: {
+        base: baseScore,
+        timeBonus,
+        moves: this.moves,
+        fuelRemaining: this.fuel,
+        parkingQuality: parkingEvaluation.total
+      }
+    };
+  }
+
+  getStats() {
+    return {
+      moves: this.moves,
+      fuel: this.fuel,
+      maxFuel: this.maxFuel
+    };
+  }
+}
+
+
+// === systems/SeasonSystem.js ===
+
+class SeasonSystem {
+  constructor() {
+    this.currentSeason = SEASONS.SUMMER;
+    this.modifiers = {
+      grip: 1.0,
+      visibility: 1.0,
+      trafficDensity: 1.0
+    };
+  }
+
+  init(engine) {
+    this.engine = engine;
+    this.setSeasonFromDate();
+  }
+
+  setSeason(season) {
+    this.currentSeason = season;
+    this.applySeasonModifiers();
+  }
+
+  setSeasonFromDate() {
+    const month = new Date().getMonth() + 1;
+    
+    if (month >= 12 || month <= 2) {
+      this.setSeason(SEASONS.WINTER);
+    } else if (month >= 6 && month <= 8) {
+      this.setSeason(SEASONS.SUMMER);
+    } else {
+      this.setSeason(SEASONS.RAIN);
+    }
+  }
+
+  applySeasonModifiers() {
+    switch (this.currentSeason) {
+      case SEASONS.WINTER:
+        this.modifiers = {
+          grip: 0.6,      // Icy roads
+          visibility: 0.9,
+          trafficDensity: 0.8
+        };
+        break;
+      case SEASONS.RAIN:
+        this.modifiers = {
+          grip: 0.8,      // Wet roads
+          visibility: 0.85,
+          trafficDensity: 1.0
+        };
+        break;
+      case SEASONS.SUMMER:
+      default:
+        this.modifiers = {
+          grip: 1.0,      // Dry roads
+          visibility: 1.0,
+          trafficDensity: 1.2
+        };
+        break;
+    }
+  }
+
+  getModifiers() {
+    return { ...this.modifiers };
+  }
+
+  getCurrentSeason() {
+    return this.currentSeason;
+  }
+}
+
+
+// === systems/GarageSystem.js ===
+
+class GarageSystem {
+  constructor() {
+    this.unlockedCars = [DRIVETRAIN.FWD];
+    this.currentCar = DRIVETRAIN.FWD;
+    this.bestScores = {};
+    this.totalRuns = 0;
+  }
+
+  init(engine) {
+    this.engine = engine;
+    this.loadProgress();
+  }
+
+  loadProgress() {
+    try {
+      const saved = localStorage.getItem('parkit_garage');
+      if (saved) {
+        const data = JSON.parse(saved);
+        this.unlockedCars = data.unlockedCars || [DRIVETRAIN.FWD];
+        this.currentCar = data.currentCar || DRIVETRAIN.FWD;
+        this.bestScores = data.bestScores || {};
+        this.totalRuns = data.totalRuns || 0;
+      }
+    } catch (e) {
+      console.warn('Failed to load garage progress:', e);
+    }
+  }
+
+  saveProgress() {
+    try {
+      const data = {
+        unlockedCars: this.unlockedCars,
+        currentCar: this.currentCar,
+        bestScores: this.bestScores,
+        totalRuns: this.totalRuns
+      };
+      localStorage.setItem('parkit_garage', JSON.stringify(data));
+    } catch (e) {
+      console.warn('Failed to save garage progress:', e);
+    }
+  }
+
+  unlockCar(drivetrain) {
+    if (!this.unlockedCars.includes(drivetrain)) {
+      this.unlockedCars.push(drivetrain);
+      this.saveProgress();
+    }
+  }
+
+  setCurrentCar(drivetrain) {
+    if (this.unlockedCars.includes(drivetrain)) {
+      this.currentCar = drivetrain;
+      this.saveProgress();
+    }
+  }
+
+  getCurrentCar() {
+    return this.currentCar;
+  }
+
+  getUnlockedCars() {
+    return [...this.unlockedCars];
+  }
+
+  recordScore(seed, score) {
+    if (!this.bestScores[seed] || score > this.bestScores[seed]) {
+      this.bestScores[seed] = score;
+    }
+    this.totalRuns++;
+    this.saveProgress();
+  }
+
+  getBestScore(seed) {
+    return this.bestScores[seed] || 0;
+  }
+
+  getTotalRuns() {
+    return this.totalRuns;
+  }
+
+  reset() {
+    this.unlockedCars = [DRIVETRAIN.FWD];
+    this.currentCar = DRIVETRAIN.FWD;
+    this.bestScores = {};
+    this.totalRuns = 0;
+    this.saveProgress();
+  }
+}
+
+
+// === systems/DirectorSystem.js ===
+
+class DirectorSystem {
+  constructor() {
+    this.currentPersonality = DIRECTOR_PERSONALITIES.FLOW;
+    this.personalityHistory = [];
+    this.stability = 1.0;
+    this.switchThreshold = 0.1;
+  }
+
+  init(engine) {
+    this.engine = engine;
+    this.selectPersonality();
+  }
+
+  selectPersonality(forced = null) {
+    if (forced) {
+      this.currentPersonality = forced;
+    } else {
+      // Weighted random selection based on history
+      const personalities = Object.values(DIRECTOR_PERSONALITIES);
+      
+      // Avoid repeating the same personality too often
+      const recent = this.personalityHistory.slice(-3);
+      const available = personalities.filter(p => !recent.includes(p));
+      
+      const rng = this.engine.rng;
+      const index = Math.floor(rng() * available.length);
+      this.currentPersonality = available[index];
+    }
+
+    this.personalityHistory.push(this.currentPersonality);
+    if (this.personalityHistory.length > 10) {
+      this.personalityHistory.shift();
+    }
+  }
+
+  getModifiers() {
+    switch (this.currentPersonality) {
+      case DIRECTOR_PERSONALITIES.FLOW:
+        return {
+          gripMultiplier: 1.0,
+          trafficMultiplier: 0.8,
+          toleranceMultiplier: 1.1,
+          description: 'Stable, forgiving gameplay'
+        };
+
+      case DIRECTOR_PERSONALITIES.CHAOS:
+        return {
+          gripMultiplier: 0.85,
+          trafficMultiplier: 1.5,
+          toleranceMultiplier: 0.9,
+          description: 'High variance, unpredictable'
+        };
+
+      case DIRECTOR_PERSONALITIES.TEACHER:
+        return {
+          gripMultiplier: 1.1,
+          trafficMultiplier: 0.5,
+          toleranceMultiplier: 1.3,
+          description: 'Forgiving learning environment'
+        };
+
+      case DIRECTOR_PERSONALITIES.RIVAL:
+        return {
+          gripMultiplier: 0.9,
+          trafficMultiplier: 1.2,
+          toleranceMultiplier: 0.85,
+          description: 'Competitive pressure'
+        };
+
+      default:
+        return {
+          gripMultiplier: 1.0,
+          trafficMultiplier: 1.0,
+          toleranceMultiplier: 1.0,
+          description: 'Standard gameplay'
+        };
+    }
+  }
+
+  updateBasedOnPerformance(successRate) {
+    // Director can switch personalities based on player performance
+    if (successRate > 0.8 && Math.random() < this.switchThreshold) {
+      // Player doing well, increase challenge
+      if (this.currentPersonality === DIRECTOR_PERSONALITIES.TEACHER) {
+        this.selectPersonality(DIRECTOR_PERSONALITIES.FLOW);
+      } else if (this.currentPersonality === DIRECTOR_PERSONALITIES.FLOW) {
+        this.selectPersonality(DIRECTOR_PERSONALITIES.RIVAL);
+      }
+    } else if (successRate < 0.3 && Math.random() < this.switchThreshold) {
+      // Player struggling, be more forgiving
+      if (this.currentPersonality === DIRECTOR_PERSONALITIES.CHAOS) {
+        this.selectPersonality(DIRECTOR_PERSONALITIES.RIVAL);
+      } else if (this.currentPersonality === DIRECTOR_PERSONALITIES.RIVAL) {
+        this.selectPersonality(DIRECTOR_PERSONALITIES.FLOW);
+      }
+    }
+  }
+
+  getCurrentPersonality() {
+    return this.currentPersonality;
+  }
+
+  setStability(value) {
+    this.stability = value;
+  }
+
+  setSwitchThreshold(value) {
+    this.switchThreshold = value;
+  }
+}
+
+
+// === systems/BalanceSystem.js ===
+class BalanceSystem {
+  constructor() {
+    this.tuning = {
+      grip: 1.0,
+      trafficDensity: 1.0,
+      parkingTolerance: 1.0,
+      scoringMultiplier: 1.0
+    };
+  }
+
+  init(engine) {
+    this.engine = engine;
+  }
+
+  applyDirectorModifiers(modifiers) {
+    // ONLY system allowed to modify tuning values
+    this.tuning.grip = modifiers.gripMultiplier;
+    this.tuning.trafficDensity = modifiers.trafficMultiplier;
+    this.tuning.parkingTolerance = modifiers.toleranceMultiplier;
+  }
+
+  applySeasonModifiers(modifiers) {
+    // Season modifiers affect grip and traffic
+    this.tuning.grip *= modifiers.grip;
+    this.tuning.trafficDensity *= modifiers.trafficDensity;
+  }
+
+  applyTuning() {
+    // Apply tuning to relevant systems
+    const physics = this.engine.getSystem('CarPhysicsSystem');
+    if (physics) {
+      physics.applyBalanceModifiers({
+        grip: this.tuning.grip,
+        maxSpeed: 1.0 // Could be modified by balance patches
+      });
+    }
+
+    const parking = this.engine.getSystem('ParkingSystem');
+    if (parking) {
+      parking.setTolerance(this.tuning.parkingTolerance);
+    }
+
+    const scoring = this.engine.getSystem('ScoringSystem');
+    if (scoring) {
+      scoring.setGlobalMultiplier(this.tuning.scoringMultiplier);
+    }
+  }
+
+  setTuning(key, value) {
+    if (this.tuning.hasOwnProperty(key)) {
+      this.tuning[key] = value;
+    }
+  }
+
+  getTuning() {
+    return { ...this.tuning };
+  }
+
+  reset() {
+    this.tuning = {
+      grip: 1.0,
+      trafficDensity: 1.0,
+      parkingTolerance: 1.0,
+      scoringMultiplier: 1.0
+    };
+  }
+}
+
+
+// === systems/ContentFactory.js ===
+
+
+class ContentFactory {
+  constructor() {
+    this.carPool = [];
+    this.bossPool = [];
+    this.modifierPool = [];
+  }
+
+  init(engine) {
+    this.engine = engine;
+    this.initializeContent();
+  }
+
+  initializeContent() {
+    // Car pool definitions
+    this.carPool = [
+      { drivetrain: DRIVETRAIN.FWD, name: 'Compact', difficulty: 0.3 },
+      { drivetrain: DRIVETRAIN.RWD, name: 'Sport', difficulty: 0.6 },
+      { drivetrain: DRIVETRAIN.AWD, name: 'Rally', difficulty: 0.8 }
+    ];
+
+    // Boss pool definitions
+    this.bossPool = [
+      { type: 'moving_zone', name: 'Shifting Spot', difficulty: 0.5 },
+      { type: 'obstacle_swarm', name: 'Cone Chaos', difficulty: 0.7 },
+      { type: 'time_pressure', name: 'Clockwork', difficulty: 0.6 }
+    ];
+
+    // Modifier pool
+    this.modifierPool = [
+      { type: 'fuel_scarcity', name: 'Low Fuel', effect: { fuelMultiplier: 0.7 } },
+      { type: 'tight_turns', name: 'Sharp Turns', effect: { steerLimit: 0.8 } },
+      { type: 'speed_limit', name: 'Speed Limit', effect: { maxSpeed: 0.8 } }
+    ];
+  }
+
+  generateCar(difficulty) {
+    const rng = this.engine.rng;
+    
+    // Select car based on difficulty
+    const availableCars = this.carPool.filter(c => c.difficulty <= difficulty + 0.2);
+    const car = availableCars[Math.floor(rng() * availableCars.length)];
+    
+    return {
+      drivetrain: car.drivetrain,
+      name: car.name,
+      baseDifficulty: car.difficulty
+    };
+  }
+
+  generateBoss(difficulty) {
+    const rng = this.engine.rng;
+    
+    // Only spawn boss at higher difficulties
+    if (difficulty < 0.4) return null;
+    
+    const availableBosses = this.bossPool.filter(b => b.difficulty <= difficulty);
+    const boss = availableBosses[Math.floor(rng() * availableBosses.length)];
+    
+    return {
+      type: boss.type,
+      name: boss.name,
+      intensity: lerp(0.5, 1.0, difficulty)
+    };
+  }
+
+  generateModifiers(difficulty) {
+    const rng = this.engine.rng;
+    const modifiers = [];
+    
+    // Number of modifiers increases with difficulty
+    const count = Math.floor(difficulty * 3);
+    
+    for (let i = 0; i < count; i++) {
+      const mod = this.modifierPool[Math.floor(rng() * this.modifierPool.length)];
+      modifiers.push({
+        type: mod.type,
+        name: mod.name,
+        effect: { ...mod.effect }
+      });
+    }
+    
+    return modifiers;
+  }
+
+  generateLevel(difficulty) {
+    return {
+      car: this.generateCar(difficulty),
+      boss: this.generateBoss(difficulty),
+      modifiers: this.generateModifiers(difficulty)
+    };
+  }
+}
+
+
+// === systems/BossSystem.js ===
+class BossSystem {
+  constructor() {
+    this.activeBoss = null;
+    this.bossTimer = 0;
+    this.obstacles = [];
+  }
+
+  init(engine) {
+    this.engine = engine;
+  }
+
+  activateBoss(bossConfig) {
+    if (!bossConfig) return;
+    
+    this.activeBoss = {
+      type: bossConfig.type,
+      name: bossConfig.name,
+      intensity: bossConfig.intensity,
+      phase: 0
+    };
+    
+    this.bossTimer = 0;
+    this.obstacles = [];
+  }
+
+  update(dt) {
+    if (!this.activeBoss) return;
+    
+    this.bossTimer += dt;
+    
+    switch (this.activeBoss.type) {
+      case 'moving_zone':
+        this.updateMovingZone(dt);
+        break;
+      case 'obstacle_swarm':
+        this.updateObstacleSwarm(dt);
+        break;
+      case 'time_pressure':
+        this.updateTimePressure(dt);
+        break;
+    }
+  }
+
+  updateMovingZone(dt) {
+    // Parking spot shifts position periodically
+    const period = 5 - (this.activeBoss.intensity * 2);
+    const phase = (this.bossTimer % period) / period;
+    
+    // Shift parking spot based on phase
+    const parking = this.engine.getSystem('ParkingSystem');
+    if (parking && parking.getParkingSpot()) {
+      const spot = parking.getParkingSpot();
+      const shift = Math.sin(phase * Math.PI * 2) * 20 * this.activeBoss.intensity;
+      // This would modify the parking spot position
+    }
+  }
+
+  updateObstacleSwarm(dt) {
+    // Spawn moving obstacles periodically
+    const spawnInterval = 2 - this.activeBoss.intensity;
+    
+    if (this.bossTimer % spawnInterval < dt) {
+      this.spawnSwarmObstacle();
+    }
+    
+    // Update obstacle positions
+    this.obstacles = this.obstacles.filter(obs => {
+      obs.x += obs.vx * dt;
+      obs.y += obs.vy * dt;
+      obs.life -= dt;
+      return obs.life > 0;
+    });
+  }
+
+  spawnSwarmObstacle() {
+    const rng = this.engine.rng;
+    const parking = this.engine.getSystem('ParkingSystem');
+    const spot = parking ? parking.getParkingSpot() : { x: 400, y: 300 };
+    
+    this.obstacles.push({
+      x: spot.x + (rng() - 0.5) * 200,
+      y: spot.y + (rng() - 0.5) * 200,
+      w: 20,
+      h: 20,
+      vx: (rng() - 0.5) * 50 * this.activeBoss.intensity,
+      vy: (rng() - 0.5) * 50 * this.activeBoss.intensity,
+      life: 3
+    });
+  }
+
+  updateTimePressure(dt) {
+    // Time-based scoring penalty increases
+    const scoring = this.engine.getSystem('ScoringSystem');
+    if (scoring) {
+      // Apply time pressure modifier
+    }
+  }
+
+  getObstacles() {
+    return this.obstacles;
+  }
+
+  getActiveBoss() {
+    return this.activeBoss;
+  }
+
+  deactivate() {
+    this.activeBoss = null;
+    this.obstacles = [];
+    this.bossTimer = 0;
+  }
+}
+
+
+// === systems/AssetManager.js ===
+class AssetManager {
+  constructor() {
+    this.assets = new Map();
+    this.loadedAssets = new Map();
+    this.genaiUrls = {
+      base: 'https://api.example.com/genai/assets'
+    };
+  }
+
+  init(engine) {
+    this.engine = engine;
+    this.initializeProceduralAssets();
+    this.preloadAssets(['bmw_m2_topdown', 'bmw_5_topdown']);
+  }
+
+  initializeProceduralAssets() {
+    // L0: Procedural fallback assets (always available)
+    this.assets.set('car_fwd', this.createProceduralCar('blue'));
+    this.assets.set('car_rwd', this.createProceduralCar('red'));
+    this.assets.set('car_awd', this.createProceduralCar('green'));
+    this.assets.set('parking_spot', this.createProceduralParkingSpot());
+    this.assets.set('cone', this.createProceduralCone());
+    this.assets.set('barrier', this.createProceduralBarrier());
+    this.assets.set('road_summer', this.createProceduralRoad('#3a3a3a'));
+    this.assets.set('road_winter', this.createProceduralRoad('#5a6a7a'));
+    this.assets.set('road_rain', this.createProceduralRoad('#2a2a35'));
+  }
+
+  createProceduralCar(color) {
+    // Create a simple canvas-based car sprite
+    const canvas = document.createElement('canvas');
+    canvas.width = 40;
+    canvas.height = 20;
+    const ctx = canvas.getContext('2d');
+    
+    // Car body
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, 40, 20);
+    
+    // Windows
+    ctx.fillStyle = '#333';
+    ctx.fillRect(8, 2, 12, 16);
+    ctx.fillRect(22, 2, 10, 16);
+    
+    // Headlights
+    ctx.fillStyle = '#ff0';
+    ctx.fillRect(36, 2, 3, 4);
+    ctx.fillRect(36, 14, 3, 4);
+    
+    // Taillights
+    ctx.fillStyle = '#f00';
+    ctx.fillRect(1, 2, 3, 4);
+    ctx.fillRect(1, 14, 3, 4);
+    
+    return canvas.toDataURL();
+  }
+
+  createProceduralParkingSpot() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 60;
+    canvas.height = 30;
+    const ctx = canvas.getContext('2d');
+    
+    // Background
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(0, 0, 60, 30);
+    
+    // Lines
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(2, 2, 56, 26);
+    
+    return canvas.toDataURL();
+  }
+
+  createProceduralCone() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 20;
+    canvas.height = 20;
+    const ctx = canvas.getContext('2d');
+    
+    ctx.fillStyle = '#ff6600';
+    ctx.beginPath();
+    ctx.moveTo(10, 2);
+    ctx.lineTo(18, 18);
+    ctx.lineTo(2, 18);
+    ctx.closePath();
+    ctx.fill();
+    
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(6, 10, 8, 3);
+    
+    return canvas.toDataURL();
+  }
+
+  createProceduralBarrier() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 40;
+    canvas.height = 15;
+    const ctx = canvas.getContext('2d');
+    
+    ctx.fillStyle = '#666';
+    ctx.fillRect(0, 0, 40, 15);
+    
+    // Stripes
+    ctx.fillStyle = '#f00';
+    for (let i = 0; i < 4; i++) {
+      ctx.fillRect(i * 10, 0, 5, 15);
+    }
+    
+    return canvas.toDataURL();
+  }
+
+  createProceduralRoad(color) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 100;
+    canvas.height = 100;
+    const ctx = canvas.getContext('2d');
+    
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, 100, 100);
+    
+    // Add subtle texture
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    for (let i = 0; i < 20; i++) {
+      ctx.fillRect(Math.random() * 100, Math.random() * 100, 2, 2);
+    }
+    
+    return canvas.toDataURL();
+  }
+
+  async loadAsset(key) {
+    // Check if already loaded
+    if (this.loadedAssets.has(key)) {
+      return this.loadedAssets.get(key);
+    }
+    
+    // Try L1: Static assets from /assets/packs/
+    try {
+      const staticPath = `/assets/packs/${key}.png`;
+      const response = await fetch(staticPath);
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        this.loadedAssets.set(key, url);
+        return url;
+      }
+    } catch (e) {
+      console.warn(`Failed to load static asset: ${key}`);
+    }
+    
+    // Try L2: GenAI CDN URLs
+    try {
+      const genaiPath = `${this.genaiUrls.base}/${key}.png`;
+      const response = await fetch(genaiPath);
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        this.loadedAssets.set(key, url);
+        return url;
+      }
+    } catch (e) {
+      console.warn(`Failed to load GenAI asset: ${key}`);
+    }
+    
+    // Fallback to L0: Procedural
+    if (this.assets.has(key)) {
+      this.loadedAssets.set(key, this.assets.get(key));
+      return this.assets.get(key);
+    }
+    
+    // Ultimate fallback
+    return null;
+  }
+
+  preloadAssets(keys) {
+    return Promise.all(keys.map(key => this.loadAsset(key)));
+  }
+
+  getAsset(key) {
+    return this.loadedAssets.get(key) || this.assets.get(key);
+  }
+
+  setGenaiBaseUrl(url) {
+    this.genaiUrls.base = url;
+  }
+}
+
+
+// === systems/ReplaySystem.js ===
+
+class ReplaySystem {
+  constructor() {
+    this.recording = false;
+    this.replaying = false;
+    this.inputs = [];
+    this.startTime = 0;
+    this.currentFrame = 0;
+  }
+
+  init(engine) {
+    this.engine = engine;
+  }
+
+  startRecording() {
+    this.recording = true;
+    this.replaying = false;
+    this.inputs = [];
+    this.startTime = performance.now();
+  }
+
+  stopRecording() {
+    this.recording = false;
+    return this.getRecording();
+  }
+
+  recordInput(input) {
+    if (!this.recording) return;
+    
+    const timestamp = performance.now() - this.startTime;
+    this.inputs.push({
+      timestamp,
+      input: { ...input }
+    });
+  }
+
+  getRecording() {
+    return {
+      seed: this.engine.seed,
+      inputs: [...this.inputs],
+      duration: performance.now() - this.startTime
+    };
+  }
+
+  startReplay(recording) {
+    this.replaying = true;
+    this.recording = false;
+    this.inputs = [...recording.inputs];
+    this.startTime = performance.now();
+    this.currentFrame = 0;
+    
+    // Set engine seed for determinism
+    this.engine.seed = recording.seed;
+    this.engine.rng = createRNG(recording.seed);
+  }
+
+  stopReplay() {
+    this.replaying = false;
+    this.inputs = [];
+  }
+
+  getCurrentInput(dt) {
+    if (!this.replaying) return null;
+    
+    const currentTime = performance.now() - this.startTime;
+    
+    // Find input for current time
+    while (this.currentFrame < this.inputs.length) {
+      const frame = this.inputs[this.currentFrame];
+      if (frame.timestamp <= currentTime) {
+        this.currentFrame++;
+        return frame.input;
+      } else {
+        break;
+      }
+    }
+    
+    // Return last known input
+    if (this.currentFrame > 0) {
+      return this.inputs[this.currentFrame - 1].input;
+    }
+    
+    return { up: false, down: false, left: false, right: false, brake: false };
+  }
+
+  isReplaying() {
+    return this.replaying;
+  }
+
+  isRecording() {
+    return this.recording;
+  }
+
+  exportToJSON() {
+    return JSON.stringify(this.getRecording());
+  }
+
+  importFromJSON(jsonString) {
+    try {
+      const data = JSON.parse(jsonString);
+      return data;
+    } catch (e) {
+      console.error('Failed to import replay:', e);
+      return null;
+    }
+  }
+
+  exportToSeed() {
+    const recording = this.getRecording();
+    // Compress to seed string for sharing
+    return btoa(JSON.stringify(recording)).substring(0, 32);
+  }
+}
+
+
+// === systems/AudioSystem.js ===
+class AudioSystem {
+  constructor() {
+    this.audioContext = null;
+    this.sounds = new Map();
+    this.musicVolume = 0.5;
+    this.sfxVolume = 0.7;
+    this.enabled = true;
+  }
+
+  init(engine) {
+    this.engine = engine;
+    this.initializeAudioContext();
+    this.initializeProceduralSounds();
+  }
+
+  initializeAudioContext() {
+    try {
+      this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+      console.warn('Web Audio API not supported');
+      this.enabled = false;
+    }
+  }
+
+  initializeProceduralSounds() {
+    // Create procedural sounds using oscillators
+    this.sounds.set('engine', () => this.createEngineSound());
+    this.sounds.set('brake', () => this.createBrakeSound());
+    this.sounds.set('success', () => this.createSuccessSound());
+    this.sounds.set('fail', () => this.createFailSound());
+  }
+
+  createEngineSound() {
+    if (!this.audioContext || !this.enabled) return null;
+    
+    const oscillator = this.audioContext.createOscillator();
+    const gainNode = this.audioContext.createGain();
+    
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.setValueAtTime(80, this.audioContext.currentTime);
+    
+    gainNode.gain.setValueAtTime(0.1 * this.sfxVolume, this.audioContext.currentTime);
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(this.audioContext.destination);
+    
+    return { oscillator, gainNode };
+  }
+
+  createBrakeSound() {
+    if (!this.audioContext || !this.enabled) return null;
+    
+    const oscillator = this.audioContext.createOscillator();
+    const gainNode = this.audioContext.createGain();
+    
+    oscillator.type = 'square';
+    oscillator.frequency.setValueAtTime(200, this.audioContext.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(50, this.audioContext.currentTime + 0.3);
+    
+    gainNode.gain.setValueAtTime(0.2 * this.sfxVolume, this.audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.3);
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(this.audioContext.destination);
+    
+    oscillator.start();
+    oscillator.stop(this.audioContext.currentTime + 0.3);
+  }
+
+  createSuccessSound() {
+    if (!this.audioContext || !this.enabled) return null;
+    
+    const oscillator = this.audioContext.createOscillator();
+    const gainNode = this.audioContext.createGain();
+    
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(440, this.audioContext.currentTime);
+    oscillator.frequency.setValueAtTime(554, this.audioContext.currentTime + 0.1);
+    oscillator.frequency.setValueAtTime(659, this.audioContext.currentTime + 0.2);
+    
+    gainNode.gain.setValueAtTime(0.3 * this.sfxVolume, this.audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.5);
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(this.audioContext.destination);
+    
+    oscillator.start();
+    oscillator.stop(this.audioContext.currentTime + 0.5);
+  }
+
+  createFailSound() {
+    if (!this.audioContext || !this.enabled) return null;
+    
+    const oscillator = this.audioContext.createOscillator();
+    const gainNode = this.audioContext.createGain();
+    
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.setValueAtTime(200, this.audioContext.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(50, this.audioContext.currentTime + 0.5);
+    
+    gainNode.gain.setValueAtTime(0.3 * this.sfxVolume, this.audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.5);
+    
+    oscillator.connect(gainNode);
+    gainNode.connect(this.audioContext.destination);
+    
+    oscillator.start();
+    oscillator.stop(this.audioContext.currentTime + 0.5);
+  }
+
+  playSound(name) {
+    if (!this.enabled) return;
+    
+    const sound = this.sounds.get(name);
+    if (sound) {
+      sound();
+    }
+  }
+
+  setMusicVolume(volume) {
+    this.musicVolume = Math.max(0, Math.min(1, volume));
+  }
+
+  setSfxVolume(volume) {
+    this.sfxVolume = Math.max(0, Math.min(1, volume));
+  }
+
+  toggleEnabled() {
+    this.enabled = !this.enabled;
+    if (!this.enabled && this.audioContext) {
+      this.audioContext.suspend();
+    } else if (this.enabled && this.audioContext) {
+      this.audioContext.resume();
+    }
+  }
+}
+
+
+// === core/GameScene.js ===
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class GameScene extends Phaser.Scene {
+  constructor() {
+    super('GameScene');
+    this.engine = null;
+    this.timeElapsed = 0;
+    this.gameState = 'playing'; // playing, won, failed
+    this.difficulty = 0;
+  }
+
+  preload() {
+    // Load BMW car assets
+    this.load.image('bmw_m2', '/assets/packs/bmw_m2_topdown.png');
+    this.load.image('bmw_5', '/assets/packs/bmw_5_topdown.png');
+  }
+
+  create() {
+    // Initialize engine
+    const seed = this.getSeedFromURL() || Date.now();
+    this.engine = new Engine({ seed });
+    
+    // Register all systems
+    this.engine
+      .registerSystem(new InputSystem())
+      .registerSystem(new CarPhysicsSystem())
+      .registerSystem(new ParkingSystem())
+      .registerSystem(new ScoringSystem())
+      .registerSystem(new SeasonSystem())
+      .registerSystem(new GarageSystem())
+      .registerSystem(new DirectorSystem())
+      .registerSystem(new BalanceSystem())
+      .registerSystem(new ContentFactory())
+      .registerSystem(new BossSystem())
+      .registerSystem(new ReplaySystem())
+      .registerSystem(new AudioSystem());
+    
+    // Initialize systems
+    this.engine.init();
+    
+    // Setup game
+    this.setupLevel();
+    this.setupGraphics();
+    this.setupUI();
+    
+    // Start replay recording
+    const replay = this.engine.getSystem('ReplaySystem');
+    replay.startRecording();
+  }
+
+  getSeedFromURL() {
+    const params = new URLSearchParams(window.location.search);
+    const seed = params.get('seed');
+    return seed ? parseInt(seed) : null;
+  }
+
+  setupLevel() {
+    const rng = this.engine.rng;
+    this.difficulty = Math.min(1, (this.engine.seed % 50) / GAME.LEVELS_TO_MAX_DIFFICULTY);
+    
+    // Generate parking lot layout
+    this.parkingLotLayout = this.generateParkingLotLayout(rng);
+    
+    // Generate content
+    const contentFactory = this.engine.getSystem('ContentFactory');
+    const level = contentFactory.generateLevel(this.difficulty);
+    
+    // Apply car selection
+    const garage = this.engine.getSystem('GarageSystem');
+    const selectedDrivetrain = garage.getCurrentCar();
+    const physics = this.engine.getSystem('CarPhysicsSystem');
+    physics.setDrivetrain(selectedDrivetrain);
+    
+    // Select a target parking space from the layout
+    const targetSpace = this.parkingLotLayout.parkingSpaces[Math.floor(rng() * this.parkingLotLayout.parkingSpaces.length)];
+    
+    // Generate parking spot (parallel to road with correct angle)
+    const parking = this.engine.getSystem('ParkingSystem');
+    parking.setParkingSpot({
+      x: targetSpace.x,
+      y: targetSpace.y,
+      width: targetSpace.width,
+      height: targetSpace.height,
+      angle: targetSpace.angle // Use space angle (parallel to road)
+    });
+    
+    // Set car start position (in the lane)
+    const spot = parking.getParkingSpot();
+    const lanePath = this.parkingLotLayout.lanePath;
+    physics.resetCar({
+      x: lanePath[0].x,
+      y: lanePath[0].y,
+      angle: 0
+    });
+    
+    // Apply director modifiers
+    const director = this.engine.getSystem('DirectorSystem');
+    const directorMods = director.getModifiers();
+    
+    // Apply season modifiers
+    const season = this.engine.getSystem('SeasonSystem');
+    const seasonMods = season.getModifiers();
+    
+    // Apply through balance system
+    const balance = this.engine.getSystem('BalanceSystem');
+    balance.applyDirectorModifiers(directorMods);
+    balance.applySeasonModifiers(seasonMods);
+    balance.applyTuning();
+    
+    // Activate boss if applicable
+    const boss = this.engine.getSystem('BossSystem');
+    if (level.boss) {
+      boss.activateBoss(level.boss);
+    }
+    
+    // Reset scoring
+    const scoring = this.engine.getSystem('ScoringSystem');
+    scoring.reset(130 + this.difficulty * 90);
+    scoring.setDrivetrainMultiplier(selectedDrivetrain);
+    
+    // Reset state
+    this.timeElapsed = 0;
+    this.gameState = 'playing';
+    
+    // Store obstacle data for generation (only in parking spaces)
+    this.obstacleData = this.generateObstacles(spot, rng);
+  }
+  
+  generateParkingLotLayout(rng) {
+    // Define parking lot layout
+    const laneWidth = 100;
+    // Randomize space dimensions around 1.25x car size (car: WIDTH=25, LENGTH=50)
+    const spaceWidth = 60 + rng() * 15; // 60-75 (1.2x-1.5x car length)
+    const spaceHeight = 30 + rng() * 10; // 30-40 (1.2x-1.6x car width)
+    const spaceGap = 20;
+    
+    // Generate random road layout with curves and intersections
+    const roadLayout = this.generateRandomRoadLayout(rng);
+    const lanePath = roadLayout.path;
+    const laneCenterY = roadLayout.centerY;
+    
+    // Helper function to get road angle at a given X position
+    const getRoadAngle = (x) => {
+      // Find the segment the X position falls on
+      for (let i = 0; i < lanePath.length - 1; i++) {
+        const p1 = lanePath[i];
+        const p2 = lanePath[i + 1];
+        
+        if (x >= p1.x && x <= p2.x) {
+          return Math.atan2(p2.y - p1.y, p2.x - p1.x);
+        }
+      }
+      return 0; // Default horizontal
+    };
+    
+    // Helper function to get road Y position at a given X position
+    const getRoadY = (x) => {
+      // Find the segment the X position falls on
+      for (let i = 0; i < lanePath.length - 1; i++) {
+        const p1 = lanePath[i];
+        const p2 = lanePath[i + 1];
+        
+        if (x >= p1.x && x <= p2.x) {
+          const t = (x - p1.x) / (p2.x - p1.x);
+          return p1.y + t * (p2.y - p1.y);
+        }
+      }
+      return laneCenterY; // Default
+    };
+    
+    // Helper function to calculate spacing based on rotation
+    const getSpacingForAngle = (angle) => {
+      // Calculate effective width after rotation
+      const effectiveWidth = Math.abs(spaceWidth * Math.cos(angle)) + Math.abs(spaceHeight * Math.sin(angle));
+      return effectiveWidth + spaceGap;
+    };
+    
+    // Generate parking spaces on both sides of the lane (parallel parking)
+    const parkingSpaces = [];
+    const numSpacesPerRow = 8; // Increased to cover full road length
+    
+    // Calculate positions with proper spacing based on rotation
+    let currentX = 100;
+    
+    // Initialize angle tracking for consistency
+    let previousAngleOffset = null;
+    
+    // Top row of parking spaces (parallel to lane, adjacent to road edge)
+    for (let i = 0; i < numSpacesPerRow; i++) {
+      const roadAngle = getRoadAngle(currentX);
+      const roadY = getRoadY(currentX);
+      const spacing = getSpacingForAngle(roadAngle);
+      
+      // Calculate extra offset for curved sections to prevent overlap
+      const curveOffset = Math.abs(Math.sin(roadAngle)) * 20; // Extra offset when curved
+      
+      // Determine angle offset with consistency
+      let angleOffsetDegrees;
+      if (previousAngleOffset === null) {
+        // First space: random angle
+        const angleType = Math.floor(rng() * 4);
+        if (angleType === 0) {
+          angleOffsetDegrees = 0; // Parallel to road
+        } else if (angleType === 1) {
+          angleOffsetDegrees = Math.PI / 4; // 45 degrees
+        } else if (angleType === 2) {
+          angleOffsetDegrees = Math.PI / 2; // 90 degrees
+        } else {
+          angleOffsetDegrees = rng() * Math.PI / 2; // Random 0-90 degrees
+        }
+      } else {
+        // Consistent with previous angle ±10 degrees
+        const variance = (rng() - 0.5) * (Math.PI / 18); // ±10 degrees in radians
+        angleOffsetDegrees = previousAngleOffset + variance;
+        // Clamp to 0-90 degrees
+        angleOffsetDegrees = Math.max(0, Math.min(Math.PI / 2, angleOffsetDegrees));
+      }
+      
+      previousAngleOffset = angleOffsetDegrees;
+      
+      // Calculate extra offset for angled spots to prevent road overlap
+      // When rotated, the effective height perpendicular to road increases
+      const effectiveHeightOffset = Math.abs(Math.sin(angleOffsetDegrees)) * spaceHeight * 0.5;
+      
+      parkingSpaces.push({
+        x: currentX,
+        y: roadY - laneWidth / 2 - spaceHeight / 2 - curveOffset - effectiveHeightOffset, // Extra offset for curves and angles
+        width: spaceWidth,
+        height: spaceHeight,
+        angle: roadAngle + angleOffsetDegrees, // Road angle plus random offset
+        occupied: false
+      });
+      
+      currentX += spacing;
+    }
+    
+    // Reset for bottom row
+    currentX = 100;
+    previousAngleOffset = null;
+    
+    // Bottom row of parking spaces (parallel to lane, adjacent to road edge)
+    for (let i = 0; i < numSpacesPerRow; i++) {
+      const roadAngle = getRoadAngle(currentX);
+      const roadY = getRoadY(currentX);
+      const spacing = getSpacingForAngle(roadAngle);
+      
+      // Calculate extra offset for curved sections to prevent overlap
+      const curveOffset = Math.abs(Math.sin(roadAngle)) * 20; // Extra offset when curved
+      
+      // Determine angle offset with consistency
+      let angleOffsetDegrees;
+      if (previousAngleOffset === null) {
+        // First space: random angle
+        const angleType = Math.floor(rng() * 4);
+        if (angleType === 0) {
+          angleOffsetDegrees = 0; // Parallel to road
+        } else if (angleType === 1) {
+          angleOffsetDegrees = Math.PI / 4; // 45 degrees
+        } else if (angleType === 2) {
+          angleOffsetDegrees = Math.PI / 2; // 90 degrees
+        } else {
+          angleOffsetDegrees = rng() * Math.PI / 2; // Random 0-90 degrees
+        }
+      } else {
+        // Consistent with previous angle ±10 degrees
+        const variance = (rng() - 0.5) * (Math.PI / 18); // ±10 degrees in radians
+        angleOffsetDegrees = previousAngleOffset + variance;
+        // Clamp to 0-90 degrees
+        angleOffsetDegrees = Math.max(0, Math.min(Math.PI / 2, angleOffsetDegrees));
+      }
+      
+      previousAngleOffset = angleOffsetDegrees;
+      
+      // Calculate extra offset for angled spots to prevent road overlap
+      // When rotated, the effective height perpendicular to road increases
+      const effectiveHeightOffset = Math.abs(Math.sin(angleOffsetDegrees)) * spaceHeight * 0.5;
+      
+      parkingSpaces.push({
+        x: currentX,
+        y: roadY + laneWidth / 2 + spaceHeight / 2 + curveOffset + effectiveHeightOffset, // Extra offset for curves and angles
+        width: spaceWidth,
+        height: spaceHeight,
+        angle: roadAngle + angleOffsetDegrees, // Road angle plus random offset
+        occupied: false
+      });
+      
+      currentX += spacing;
+    }
+    
+    // Define lane boundaries as points along the path
+    const laneBoundaries = {
+      top: [],
+      bottom: []
+    };
+    
+    for (const point of lanePath) {
+      laneBoundaries.top.push({ x: point.x, y: point.y - laneWidth / 2 });
+      laneBoundaries.bottom.push({ x: point.x, y: point.y + laneWidth / 2 });
+    }
+    
+    // Define interesting-shaped buildings (L-shaped, T-shaped, etc.)
+    const buildings = [
+      // L-shaped building top left
+      { x: 60, y: 20, width: 100, height: 60 },
+      { x: 60, y: 80, width: 40, height: 40 },
+      // T-shaped building top middle
+      { x: 200, y: 20, width: 80, height: 60 },
+      { x: 220, y: 80, width: 40, height: 40 },
+      // L-shaped building top right
+      { x: 500, y: 20, width: 100, height: 60 },
+      { x: 560, y: 80, width: 40, height: 40 },
+      // T-shaped building bottom left
+      { x: 60, y: 480, width: 80, height: 60 },
+      { x: 80, y: 540, width: 40, height: 40 },
+      // L-shaped building bottom middle
+      { x: 250, y: 480, width: 100, height: 60 },
+      { x: 250, y: 540, width: 40, height: 40 },
+      // T-shaped building bottom right
+      { x: 520, y: 480, width: 80, height: 60 },
+      { x: 540, y: 540, width: 40, height: 40 }
+    ];
+    
+    // Add trees between parking spaces
+    const trees = [];
+    const treeWidth = 15;
+    const treeHeight = 15;
+    
+    // Calculate tree positions between spaces
+    let treeX = 100 + (spaceWidth + spaceGap) / 2; // Position between first and second space
+    
+    for (let i = 0; i < numSpacesPerRow - 1; i++) {
+      const roadAngle = getRoadAngle(treeX);
+      const roadY = getRoadY(treeX);
+      const curveOffset = Math.abs(Math.sin(roadAngle)) * 20; // Same curve offset as spaces
+      
+      // Trees need extra offset to account for angled parking spaces
+      // Use maximum possible angle offset (90 degrees) for trees
+      const maxAngleOffset = Math.sin(Math.PI / 2) * spaceHeight * 0.5;
+      
+      // Trees follow road angle (not parking space angle)
+      trees.push({
+        x: treeX,
+        y: roadY - laneWidth / 2 - spaceHeight / 2 - 20 - curveOffset - maxAngleOffset, // Follow road curve with offset
+        width: treeWidth,
+        height: treeHeight,
+        angle: roadAngle,
+        type: 'tree'
+      });
+      
+      // Bottom row trees
+      trees.push({
+        x: treeX,
+        y: roadY + laneWidth / 2 + spaceHeight / 2 + 20 + curveOffset + maxAngleOffset, // Follow road curve with offset
+        width: treeWidth,
+        height: treeHeight,
+        angle: roadAngle,
+        type: 'tree'
+      });
+      
+      // Move to next gap
+      const spacing = getSpacingForAngle(roadAngle);
+      treeX += spacing;
+    }
+    
+    return {
+      laneWidth,
+      laneCenterY,
+      lanePath,
+      laneBoundaries,
+      parkingSpaces,
+      buildings,
+      trees
+    };
+  }
+  
+  generateRandomRoadLayout(rng) {
+    // Generate random road layout with curves and intersections
+    const layoutType = Math.floor(rng() * 3); // 0: straight with gentle curves, 1: gentle S-curve, 2: gentle intersection
+    
+    let path;
+    let centerY = 300;
+    
+    if (layoutType === 0) {
+      // Straight with gentle curves - max 45 degrees
+      const maxCurveY = Math.tan(Math.PI / 4) * 250; // 45 degrees over 250px = 250px
+      const curveAmount = (rng() - 0.5) * maxCurveY;
+      path = [
+        { x: 50, y: centerY },
+        { x: 200, y: centerY },
+        { x: 350, y: centerY + curveAmount * 0.5 }, // Gradual transition
+        { x: 500, y: centerY + curveAmount },
+        { x: 650, y: centerY + curveAmount * 0.5 }, // Gradual transition back
+        { x: 750, y: centerY }
+      ];
+    } else if (layoutType === 1) {
+      // Gentle S-curve - max 45 degrees per segment
+      const maxCurveY = Math.tan(Math.PI / 4) * 150; // 45 degrees over 150px = 150px
+      const curve1 = (rng() - 0.5) * maxCurveY;
+      const curve2 = (rng() - 0.5) * maxCurveY;
+      path = [
+        { x: 50, y: centerY },
+        { x: 200, y: centerY + curve1 * 0.5 }, // Gradual
+        { x: 400, y: centerY + curve1 + curve2 },
+        { x: 600, y: centerY + curve2 * 0.5 }, // Gradual
+        { x: 750, y: centerY }
+      ];
+    } else {
+      // Gentle intersection (T-junction) - max 45 degrees
+      const intersectionX = 350 + Math.floor(rng() * 100); // More centered
+      const maxIntersectionY = Math.tan(Math.PI / 4) * 100; // 45 degrees over 100px = 100px
+      const intersectionY = centerY + (rng() - 0.5) * maxIntersectionY;
+      path = [
+        { x: 50, y: centerY },
+        { x: intersectionX - 50, y: centerY }, // Approach point
+        { x: intersectionX, y: centerY },
+        { x: intersectionX, y: intersectionY },
+        { x: intersectionX + 50, y: intersectionY }, // Exit point
+        { x: 750, y: intersectionY }
+      ];
+      centerY = (centerY + intersectionY) / 2; // Average Y for parking spaces
+    }
+    
+    return { path, centerY };
+  }
+  
+  generateObstacles(spot, rng) {
+    const obstacles = [];
+    // Fill 75% of available spaces
+    const fillRatio = 0.75;
+    const numObstacles = Math.floor(this.parkingLotLayout.parkingSpaces.length * fillRatio);
+    
+    // Get available parking spaces (not the target spot)
+    const availableSpaces = this.parkingLotLayout.parkingSpaces.filter(space => 
+      !(space.x === spot.x && space.y === spot.y)
+    );
+    
+    // Shuffle available spaces
+    for (let i = availableSpaces.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [availableSpaces[i], availableSpaces[j]] = [availableSpaces[j], availableSpaces[i]];
+    }
+    
+    // Place obstacles in parking spaces (parallel to road with correct angle)
+    for (let i = 0; i < Math.min(numObstacles, availableSpaces.length); i++) {
+      const space = availableSpaces[i];
+      // Use consistent dimensions for collision (based on car size)
+      const carWidth = 25; // Consistent car width
+      const carLength = 50; // Consistent car length
+      
+      // Add random offset within the parking space for variety
+      const offsetX = (rng() - 0.5) * 10; // -5 to +5 pixels
+      const offsetY = (rng() - 0.5) * 6; // -3 to +3 pixels
+      
+      obstacles.push({
+        x: space.x + offsetX,
+        y: space.y + offsetY,
+        width: carLength, // Car length along road
+        height: carWidth, // Car width perpendicular to road
+        angle: space.angle // Use space angle (parallel to road)
+      });
+    }
+    
+    return obstacles;
+  }
+
+  setupGraphics() {
+    // Asphalt background
+    this.add.rectangle(400, 300, 800, 600, 0x333333);
+    
+    // Draw buildings (interesting shapes - multiple rectangles)
+    for (const building of this.parkingLotLayout.buildings) {
+      this.add.rectangle(
+        building.x + building.width / 2,
+        building.y + building.height / 2,
+        building.width,
+        building.height,
+        0x555555
+      ).setStrokeStyle(3, 0x222222);
+    }
+    
+    // Draw trees (green rectangles between spaces)
+    if (this.parkingLotLayout.trees) {
+      for (const tree of this.parkingLotLayout.trees) {
+        const treeRect = this.add.rectangle(
+          tree.x, tree.y, tree.width, tree.height,
+          0x228822
+        ).setStrokeStyle(2, 0x004400);
+        treeRect.setRotation(tree.angle);
+      }
+    }
+    
+    // Draw lane using graphics for smooth curves
+    const lanePath = this.parkingLotLayout.lanePath;
+    const laneWidth = this.parkingLotLayout.laneWidth;
+    const graphics = this.add.graphics();
+    
+    // Draw lane fill (thick line along path)
+    graphics.lineStyle(laneWidth, 0x444444, 1);
+    graphics.beginPath();
+    graphics.moveTo(lanePath[0].x, lanePath[0].y);
+    for (let i = 1; i < lanePath.length; i++) {
+      graphics.lineTo(lanePath[i].x, lanePath[i].y);
+    }
+    graphics.strokePath();
+    
+    // Draw lane boundaries (thin yellow lines)
+    graphics.lineStyle(2, 0xffff00, 1);
+    
+    // Top boundary
+    graphics.beginPath();
+    for (let i = 0; i < lanePath.length; i++) {
+      const point = lanePath[i];
+      const boundaryY = point.y - laneWidth / 2;
+      if (i === 0) {
+        graphics.moveTo(point.x, boundaryY);
+      } else {
+        graphics.lineTo(point.x, boundaryY);
+      }
+    }
+    graphics.strokePath();
+    
+    // Bottom boundary
+    graphics.beginPath();
+    for (let i = 0; i < lanePath.length; i++) {
+      const point = lanePath[i];
+      const boundaryY = point.y + laneWidth / 2;
+      if (i === 0) {
+        graphics.moveTo(point.x, boundaryY);
+      } else {
+        graphics.lineTo(point.x, boundaryY);
+      }
+    }
+    graphics.strokePath();
+    
+    // Draw lane center line (dashed)
+    graphics.lineStyle(2, 0xffffff, 1);
+    for (let i = 0; i < lanePath.length - 1; i++) {
+      const p1 = lanePath[i];
+      const p2 = lanePath[i + 1];
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const segments = Math.floor(dist / 25);
+      
+      for (let j = 0; j < segments; j++) {
+        const t1 = j / segments;
+        const t2 = (j + 0.5) / segments;
+        const x1 = p1.x + dx * t1;
+        const y1 = p1.y + dy * t1;
+        const x2 = p1.x + dx * t2;
+        const y2 = p1.y + dy * t2;
+        
+        graphics.beginPath();
+        graphics.moveTo(x1, y1);
+        graphics.lineTo(x2, y2);
+        graphics.strokePath();
+      }
+    }
+    
+    // Draw all parking spaces with correct rotation
+    for (const space of this.parkingLotLayout.parkingSpaces) {
+      // Space outline
+      const spaceRect = this.add.rectangle(
+        space.x, space.y, space.width, space.height,
+        0x000000, 0
+      );
+      spaceRect.setStrokeStyle(2, 0xffffff);
+      spaceRect.setRotation(space.angle);
+    }
+    
+    // Highlight target parking spot
+    const parking = this.engine.getSystem('ParkingSystem');
+    const spot = parking.getParkingSpot();
+    this.parkingSpotGraphics = this.add.rectangle(
+      spot.x, spot.y, spot.width, spot.height,
+      0x00ff00, 0.2
+    );
+    this.parkingSpotGraphics.setStrokeStyle(3, 0x00ff00);
+    this.parkingSpotGraphics.setRotation(spot.angle);
+    
+    // Add FRONT and BACK text to indicate parking direction
+    const textOffset = spot.width / 2 - 10;
+    const frontX = spot.x + Math.cos(spot.angle) * textOffset;
+    const frontY = spot.y + Math.sin(spot.angle) * textOffset;
+    const backX = spot.x - Math.cos(spot.angle) * textOffset;
+    const backY = spot.y - Math.sin(spot.angle) * textOffset;
+    
+    // FRONT text (white, smaller, rotated 90 degrees)
+    const frontText = this.add.text(frontX, frontY, 'FRONT', {
+      fontSize: '12px',
+      color: '#ffffff',
+      fontStyle: 'bold',
+      backgroundColor: 'rgba(0,0,0,0.5)',
+      padding: { x: 3, y: 1 }
+    }).setOrigin(0.5);
+    frontText.setRotation(spot.angle + Math.PI / 2); // Rotate 90 degrees
+    
+    // BACK text (white, smaller, rotated 90 degrees)
+    const backText = this.add.text(backX, backY, 'BACK', {
+      fontSize: '12px',
+      color: '#ffffff',
+      fontStyle: 'bold',
+      backgroundColor: 'rgba(0,0,0,0.5)',
+      padding: { x: 3, y: 1 }
+    }).setOrigin(0.5);
+    backText.setRotation(spot.angle + Math.PI / 2); // Rotate 90 degrees
+    
+    // Player car sprite (BMW M2)
+    const physics = this.engine.getSystem('CarPhysicsSystem');
+    const carState = physics.getCarState();
+    this.carGraphics = this.add.sprite(carState.x, carState.y, 'bmw_m2');
+    this.carGraphics.setScale(0.18); // Increased scale for larger parking spaces
+    this.carGraphics.setRotation(Math.PI / 2); // Rotate 90 degrees to face right (sprite faces up, physics angle 0 is right)
+    
+    // Obstacles (parked cars) - use BMW 5
+    this.obstacles = [];
+    for (const obsData of this.obstacleData) {
+      const obs = this.add.sprite(obsData.x, obsData.y, 'bmw_5');
+      // Use consistent scale for all cars
+      obs.setScale(0.18);
+      obs.setRotation(obsData.angle + Math.PI / 2); // Use obstacle angle + sprite offset
+      this.obstacles.push(obs);
+    }
+    
+    // Draw bounding boxes
+    this.drawBoundingBoxes();
+  }
+  
+  drawBoundingBoxes() {
+    // Draw player car bounding box (rotated)
+    const carWidth = this.carGraphics.width * this.carGraphics.scaleX;
+    const carHeight = this.carGraphics.height * this.carGraphics.scaleY;
+    const carAngle = this.carGraphics.rotation;
+    const carCorners = this.getRotatedCorners(this.carGraphics.x, this.carGraphics.y, carWidth, carHeight, carAngle);
+    
+    const carBox = this.add.graphics();
+    carBox.lineStyle(2, 0xffa500); // Orange
+    carBox.beginPath();
+    carBox.moveTo(carCorners[0].x, carCorners[0].y);
+    for (let i = 1; i < carCorners.length; i++) {
+      carBox.lineTo(carCorners[i].x, carCorners[i].y);
+    }
+    carBox.closePath();
+    carBox.strokePath();
+    this.carBoundingBoxGraphics = carBox;
+    
+    // Draw obstacle bounding boxes (rotated)
+    this.obstacleBoundingBoxGraphics = [];
+    for (let i = 0; i < this.obstacles.length; i++) {
+      const obs = this.obstacles[i];
+      // Use sprite visual dimensions for bounding box to match what you see
+      const obsWidth = obs.width * obs.scaleX;
+      const obsHeight = obs.height * obs.scaleY;
+      const obsAngle = obs.rotation;
+      const obsCorners = this.getRotatedCorners(obs.x, obs.y, obsWidth, obsHeight, obsAngle);
+      
+      const obsBox = this.add.graphics();
+      obsBox.lineStyle(2, 0xffa500); // Orange
+      obsBox.beginPath();
+      obsBox.moveTo(obsCorners[0].x, obsCorners[0].y);
+      for (let j = 1; j < obsCorners.length; j++) {
+        obsBox.lineTo(obsCorners[j].x, obsCorners[j].y);
+      }
+      obsBox.closePath();
+      obsBox.strokePath();
+      this.obstacleBoundingBoxGraphics.push(obsBox);
+    }
+  }
+  
+  updateBoundingBoxes() {
+    // Update player car bounding box (rotated)
+    const carWidth = this.carGraphics.width * this.carGraphics.scaleX;
+    const carHeight = this.carGraphics.height * this.carGraphics.scaleY;
+    const carAngle = this.carGraphics.rotation;
+    const carCorners = this.getRotatedCorners(this.carGraphics.x, this.carGraphics.y, carWidth, carHeight, carAngle);
+    
+    this.carBoundingBoxGraphics.clear();
+    this.carBoundingBoxGraphics.lineStyle(2, 0xffa500); // Orange
+    this.carBoundingBoxGraphics.beginPath();
+    this.carBoundingBoxGraphics.moveTo(carCorners[0].x, carCorners[0].y);
+    for (let i = 1; i < carCorners.length; i++) {
+      this.carBoundingBoxGraphics.lineTo(carCorners[i].x, carCorners[i].y);
+    }
+    this.carBoundingBoxGraphics.closePath();
+    this.carBoundingBoxGraphics.strokePath();
+    
+    // Update obstacle bounding boxes (rotated)
+    for (let i = 0; i < this.obstacles.length; i++) {
+      const obs = this.obstacles[i];
+      // Use sprite visual dimensions for bounding box to match what you see
+      const obsWidth = obs.width * obs.scaleX;
+      const obsHeight = obs.height * obs.scaleY;
+      const obsAngle = obs.rotation;
+      const obsCorners = this.getRotatedCorners(obs.x, obs.y, obsWidth, obsHeight, obsAngle);
+      
+      this.obstacleBoundingBoxGraphics[i].clear();
+      this.obstacleBoundingBoxGraphics[i].lineStyle(2, 0xffa500); // Orange
+      this.obstacleBoundingBoxGraphics[i].beginPath();
+      this.obstacleBoundingBoxGraphics[i].moveTo(obsCorners[0].x, obsCorners[0].y);
+      for (let j = 1; j < obsCorners.length; j++) {
+        this.obstacleBoundingBoxGraphics[i].lineTo(obsCorners[j].x, obsCorners[j].y);
+      }
+      this.obstacleBoundingBoxGraphics[i].closePath();
+      this.obstacleBoundingBoxGraphics[i].strokePath();
+    }
+  }
+
+  setupUI() {
+    // Score display
+    this.scoreText = this.add.text(10, 10, '', {
+      fontSize: '16px',
+      color: '#ffffff',
+      backgroundColor: 'rgba(0,0,0,0.5)',
+      padding: { x: 10, y: 10 }
+    });
+    
+    // Debug info
+    const parking = this.engine.getSystem('ParkingSystem');
+    const spot = parking.getParkingSpot();
+    this.add.text(10, 40, `Target: (${spot.x.toFixed(0)}, ${spot.y.toFixed(0)}) angle: ${(spot.angle * 180 / Math.PI).toFixed(1)}°`, {
+      fontSize: '14px',
+      color: '#ffff00',
+      backgroundColor: 'rgba(0,0,0,0.5)'
+    });
+    
+    this.add.text(10, 60, `Obstacles: ${this.obstacleData.length}`, {
+      fontSize: '14px',
+      color: '#ffff00',
+      backgroundColor: 'rgba(0,0,0,0.5)'
+    });
+    
+    // Instructions
+    this.add.text(400, 580, 'Arrow Keys / WASD to drive | SHIFT to brake | R to restart | SPACE for parking brake', {
+      fontSize: '14px',
+      color: '#ffffff'
+    }).setOrigin(0.5);
+    
+    // Parking brake button
+    this.parkingBrakeButton = this.add.text(700, 30, 'PARK', {
+      fontSize: '18px',
+      color: '#ffffff',
+      backgroundColor: '#e74c3c',
+      padding: { x: 20, y: 10 },
+      fixedWidth: 80,
+      align: 'center'
+    }).setOrigin(0.5);
+    this.parkingBrakeButton.setInteractive({ useHandCursor: true });
+    this.parkingBrakeButton.on('pointerdown', () => this.triggerParkingBrake());
+    
+    // Parking brake key shortcut
+    this.input.keyboard.on('keydown-SPACE', () => this.triggerParkingBrake());
+    
+    // Result overlay (hidden initially)
+    this.resultOverlay = this.add.rectangle(400, 300, 800, 600, 0x000000, 0.7);
+    this.resultOverlay.setVisible(false);
+    
+    this.resultText = this.add.text(400, 300, '', {
+      fontSize: '32px',
+      color: '#ffffff',
+      align: 'center'
+    }).setOrigin(0.5);
+    this.resultText.setVisible(false);
+    
+    // Restart key - use one-time listener to prevent multiple restarts
+    this.input.keyboard.once('keydown-R', () => this.restart());
+  }
+
+  update(time, delta) {
+    if (this.gameState !== 'playing') return;
+    
+    const dt = delta / 1000;
+    this.timeElapsed += dt;
+    
+    // Get input
+    const inputSystem = this.engine.getSystem('InputSystem');
+    const input = inputSystem.getInput();
+    
+    // Track moves
+    if (inputSystem.hasChanged()) {
+      const scoring = this.engine.getSystem('ScoringSystem');
+      scoring.incrementMove();
+      inputSystem.snapshot();
+    }
+    
+    // Update physics
+    const physics = this.engine.getSystem('CarPhysicsSystem');
+    physics.update(dt, input);
+    
+    // Update fuel
+    const scoring = this.engine.getSystem('ScoringSystem');
+    const carState = physics.getCarState();
+    scoring.updateFuel(carState, input, dt);
+    
+    // Record replay
+    const replay = this.engine.getSystem('ReplaySystem');
+    replay.recordInput(input);
+    
+    // Check win/lose conditions
+    this.checkGameEnd();
+    
+    // Update graphics
+    this.updateGraphics();
+    
+    // Update UI (every 10 frames for performance)
+    if (time % 10 < 20) {
+      this.updateUI();
+    }
+    
+    // Check fuel
+    if (scoring.getStats().fuel <= 0) {
+      this.endGame(false);
+    }
+  }
+
+  checkGameEnd() {
+    const physics = this.engine.getSystem('CarPhysicsSystem');
+    const carState = physics.getCarState();
+    
+    // Check collision with obstacles
+    for (const obs of this.obstacles) {
+      if (this.checkCollision(carState, obs)) {
+        this.endGame(false);
+        return;
+      }
+    }
+    
+    // Check collision with lane boundaries
+    if (this.checkLaneBoundaryCollision(carState)) {
+      this.endGame(false);
+      return;
+    }
+    
+    // Automatic parking detection removed - player must use parking brake (PARK button or SPACE)
+  }
+  
+  checkLaneBoundaryCollision(car) {
+    const lanePath = this.parkingLotLayout.lanePath;
+    const laneWidth = this.parkingLotLayout.laneWidth;
+    const laneCenterY = this.parkingLotLayout.laneCenterY;
+    
+    // Check if car is in building areas (stricter check with margin)
+    for (const building of this.parkingLotLayout.buildings) {
+      const margin = 10;
+      if (car.x > building.x - margin && 
+          car.x < building.x + building.width + margin &&
+          car.y > building.y - margin && 
+          car.y < building.y + building.height + margin) {
+        return true;
+      }
+    }
+    
+    // Check if car hits trees
+    if (this.parkingLotLayout.trees) {
+      for (const tree of this.parkingLotLayout.trees) {
+        const margin = 5;
+        if (car.x > tree.x - tree.width / 2 - margin && 
+            car.x < tree.x + tree.width / 2 + margin &&
+            car.y > tree.y - tree.height / 2 - margin && 
+            car.y < tree.y + tree.height / 2 + margin) {
+          return true;
+        }
+      }
+    }
+    
+    // Check screen bounds
+    if (car.x < 20 || car.x > 780 || car.y < 20 || car.y > 580) {
+      return true;
+    }
+    
+    // Allow car to be anywhere except buildings, trees, and screen bounds
+    // Parking spaces and areas around them are allowed
+    return false;
+  }
+
+  checkCollision(car, obstacle) {
+    // Get car sprite dimensions and rotation
+    const carWidth = this.carGraphics.width * this.carGraphics.scaleX;
+    const carHeight = this.carGraphics.height * this.carGraphics.scaleY;
+    const carAngle = this.carGraphics.rotation;
+    
+    // Get obstacle sprite visual dimensions (matches bounding box)
+    const obsWidth = obstacle.width * obstacle.scaleX;
+    const obsHeight = obstacle.height * obstacle.scaleY;
+    const obsAngle = obstacle.rotation;
+    
+    // Calculate rotated corners for car
+    const carCorners = this.getRotatedCorners(car.x, car.y, carWidth, carHeight, carAngle);
+    
+    // Calculate rotated corners for obstacle
+    const obsCorners = this.getRotatedCorners(obstacle.x, obstacle.y, obsWidth, obsHeight, obsAngle);
+    
+    // Use separating axis theorem for rotated rectangle collision
+    return this.checkRotatedCollision(carCorners, obsCorners);
+  }
+  
+  getRotatedCorners(x, y, width, height, angle) {
+    const halfW = width / 2;
+    const halfH = height / 2;
+    
+    // Unrotated corners (relative to center)
+    const corners = [
+      { x: -halfW, y: -halfH },
+      { x: halfW, y: -halfH },
+      { x: halfW, y: halfH },
+      { x: -halfW, y: halfH }
+    ];
+    
+    // Rotate and translate corners
+    return corners.map(corner => ({
+      x: x + corner.x * Math.cos(angle) - corner.y * Math.sin(angle),
+      y: y + corner.x * Math.sin(angle) + corner.y * Math.cos(angle)
+    }));
+  }
+  
+  checkRotatedCollision(corners1, corners2) {
+    // Separating axis theorem
+    const axes = [];
+    
+    // Get axes from first rectangle
+    for (let i = 0; i < 4; i++) {
+      const p1 = corners1[i];
+      const p2 = corners1[(i + 1) % 4];
+      axes.push({
+        x: p2.y - p1.y,
+        y: p1.x - p2.x
+      });
+    }
+    
+    // Get axes from second rectangle
+    for (let i = 0; i < 4; i++) {
+      const p1 = corners2[i];
+      const p2 = corners2[(i + 1) % 4];
+      axes.push({
+        x: p2.y - p1.y,
+        y: p1.x - p2.x
+      });
+    }
+    
+    // Normalize axes
+    for (const axis of axes) {
+      const len = Math.sqrt(axis.x * axis.x + axis.y * axis.y);
+      if (len > 0) {
+        axis.x /= len;
+        axis.y /= len;
+      }
+    }
+    
+    // Check for separating axis
+    for (const axis of axes) {
+      let min1 = Infinity, max1 = -Infinity;
+      let min2 = Infinity, max2 = -Infinity;
+      
+      for (const corner of corners1) {
+        const proj = corner.x * axis.x + corner.y * axis.y;
+        min1 = Math.min(min1, proj);
+        max1 = Math.max(max1, proj);
+      }
+      
+      for (const corner of corners2) {
+        const proj = corner.x * axis.x + corner.y * axis.y;
+        min2 = Math.min(min2, proj);
+        max2 = Math.max(max2, proj);
+      }
+      
+      if (max1 < min2 || max2 < min1) {
+        return false; // Separating axis found
+      }
+    }
+    
+    return true; // No separating axis, collision detected
+  }
+
+  updateGraphics() {
+    const physics = this.engine.getSystem('CarPhysicsSystem');
+    const carState = physics.getCarState();
+    
+    // Update car position and rotation (add PI/2 offset for sprite orientation)
+    this.carGraphics.setPosition(carState.x, carState.y);
+    this.carGraphics.rotation = carState.angle + Math.PI / 2;
+    
+    // Update bounding boxes
+    this.updateBoundingBoxes();
+  }
+
+  updateUI() {
+    const scoring = this.engine.getSystem('ScoringSystem');
+    const stats = scoring.getStats();
+    const director = this.engine.getSystem('DirectorSystem');
+    const season = this.engine.getSystem('SeasonSystem');
+    
+    this.scoreText.setText(
+      `Fuel: ${stats.fuel.toFixed(0)}\n` +
+      `Moves: ${stats.moves}\n` +
+      `Time: ${this.timeElapsed.toFixed(1)}s\n` +
+      `Director: ${director.getCurrentPersonality()}\n` +
+      `Season: ${season.getCurrentSeason()}\n` +
+      `Difficulty: ${(this.difficulty * 100).toFixed(0)}%`
+    );
+  }
+
+  endGame(won, evaluation = null) {
+    this.gameState = won ? 'won' : 'failed';
+    
+    const replay = this.engine.getSystem('ReplaySystem');
+    replay.stopRecording();
+    
+    const scoring = this.engine.getSystem('ScoringSystem');
+    const garage = this.engine.getSystem('GarageSystem');
+    
+    let finalScore = 0;
+    if (won && evaluation) {
+      finalScore = scoring.computeFinalScore(evaluation, this.timeElapsed);
+      console.log('Final score breakdown:', finalScore.breakdown);
+      garage.recordScore(this.engine.seed, finalScore.final);
+    }
+    
+    // Show result
+    this.resultOverlay.setVisible(true);
+    this.resultText.setVisible(true);
+    this.resultText.setText(
+      won ? `PARKED!\nScore: ${finalScore.final.toFixed(0)}` : 'FAILED\nPress R to retry'
+    );
+    
+    // Play sound
+    const audio = this.engine.getSystem('AudioSystem');
+    audio.playSound(won ? 'success' : 'fail');
+  }
+
+  restart() {
+    // Reset scene
+    this.scene.restart();
+  }
+  
+  triggerParkingBrake() {
+    if (this.gameState !== 'playing') return;
+    
+    const physics = this.engine.getSystem('CarPhysicsSystem');
+    const parking = this.engine.getSystem('ParkingSystem');
+    const scoring = this.engine.getSystem('ScoringSystem');
+    const carState = physics.getCarState();
+    
+    // Check if car is stopped
+    if (Math.abs(carState.velocity) > 10) {
+      // Flash a warning that car must be stopped
+      this.showTemporaryMessage('Stop the car first!', '#e74c3c');
+      return;
+    }
+    
+    // Evaluate parking
+    const evaluation = parking.evaluateParking(carState);
+    
+    // Debug logging
+    console.log('Parking evaluation:', evaluation);
+    console.log('Car state:', carState);
+    console.log('Scoring stats:', scoring.getStats());
+    
+    if (parking.checkWin(carState, evaluation)) {
+      this.endGame(true, evaluation);
+    } else {
+      // Show feedback on why parking failed
+      const feedback = this.getParkingFeedback(evaluation);
+      this.showTemporaryMessage(feedback, '#e67e22');
+    }
+  }
+  
+  getParkingFeedback(evaluation) {
+    if (evaluation.positionScore < 50) {
+      return 'Position too far from center';
+    } else if (evaluation.angleScore < 50) {
+      return 'Angle not aligned';
+    } else {
+      return 'Not quite in the spot';
+    }
+  }
+  
+  showTemporaryMessage(text, color) {
+    const msg = this.add.text(400, 200, text, {
+      fontSize: '24px',
+      color: color,
+      backgroundColor: 'rgba(0,0,0,0.8)',
+      padding: { x: 20, y: 10 }
+    }).setOrigin(0.5);
+    
+    // Fade out and remove after 2 seconds
+    this.tweens.add({
+      targets: msg,
+      alpha: 0,
+      duration: 1500,
+      delay: 500,
+      onComplete: () => msg.destroy()
+    });
+  }
+}
+
+
+// === Game Initialization ===
+
+const config = {
+  type: Phaser.AUTO,
+  width: 800,
+  height: 600,
+  parent: 'game-container',
+  backgroundColor: '#1a1a1a',
+  scene: [GameScene],
+  physics: {
+    default: 'arcade',
+    arcade: {
+      gravity: { y: 0 },
+      debug: false
+    }
+  },
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH
+  }
+};
+
+const game = new Phaser.Game(config);
+
+</script>
+<script>window.BUILD_META = {"timestamp":1776713234760,"commit":"3922b0d9f70e2127be85a3f77b41f4e095025482","branch":"refs/heads/main"};</script></body>
+</html>
