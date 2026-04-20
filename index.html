@@ -245,6 +245,7 @@ class CarPhysicsSystem {
       grip: 1.0,
       maxSpeed: 1.0
     };
+    this.wheelSteeringAngle = 0; // Wheel steering angle from visual wheels
   }
 
   init(engine) {
@@ -261,6 +262,10 @@ class CarPhysicsSystem {
       steering: 0,
       angularVelocity: 0
     };
+  }
+  
+  setWheelSteeringAngle(angle) {
+    this.wheelSteeringAngle = angle;
   }
 
   setDrivetrain(drivetrain) {
@@ -282,12 +287,9 @@ class CarPhysicsSystem {
     const effectiveMaxSpeed = PHYSICS.MAX_SPEED * this.balanceModifiers.maxSpeed;
     const effectiveFriction = PHYSICS.FRICTION * this.balanceModifiers.grip;
 
-    // Steering smoothing
-    const targetSteer =
-      input.left ? -PHYSICS.MAX_STEER :
-      input.right ? PHYSICS.MAX_STEER : 0;
-
-    this.car.steering += (targetSteer - this.car.steering) * 0.3;
+    // Use wheel steering angle for movement (from visual wheels)
+    // Don't calculate internal steering - use the wheel angle directly
+    this.car.steering = this.wheelSteeringAngle;
 
     // Acceleration based on drivetrain
     let accelMultiplier = 1.0;
@@ -311,7 +313,7 @@ class CarPhysicsSystem {
     this.car.x += Math.cos(this.car.angle) * this.car.velocity * dt;
     this.car.y += Math.sin(this.car.angle) * this.car.velocity * dt;
 
-    // Rotation (bicycle model with drivetrain influence)
+    // Rotation using wheel steering angle (bicycle model)
     let turnMultiplier = 1.0;
     if (this.drivetrain === DRIVETRAIN.FWD) {
       // FWD: more responsive steering at low speeds
@@ -1517,6 +1519,8 @@ class GameScene extends Phaser.Scene {
     this.timeElapsed = 0;
     this.gameState = 'playing'; // playing, won, failed
     this.difficulty = 0;
+    this.currentSteerAngle = 0; // Current steering angle for gradual animation
+    this.showBoundingBoxes = false; // Bounding boxes toggle (default OFF)
   }
 
   preload() {
@@ -2125,9 +2129,29 @@ class GameScene extends Phaser.Scene {
     this.carGraphics.setDepth(1); // Render above wheels
     
     // Create 4 wheels for the player car
-    const wheelScale = 0.18;
-    const wheelOffsetX = 8; // Half of car length (9px) minus small margin
-    const wheelOffsetY = 4; // Half of car width (4.5px) minus small margin
+    const wheelScale = 0.02373046875; // 25% smaller (0.031640625 * 0.75)
+    
+    // Calculate car sprite dimensions after scaling
+    const carWidth = this.carGraphics.width * this.carGraphics.scaleX;
+    const carHeight = this.carGraphics.height * this.carGraphics.scaleY;
+    
+    // Position wheels closer to center in width, farther in height
+    // Car faces right (angle 0 = right in physics, sprite rotated 90°)
+    // Y axis = front/back, X axis = left/right in sprite coordinates
+    // Front wheels at 20% from front (negative Y)
+    // Rear wheels at 20% from back (positive Y)
+    const frontOffset = -carHeight / 2 + (carHeight * 0.20); // 20% from front
+    const rearOffset = carHeight / 2 - (carHeight * 0.20); // 20% from back
+    const sideOffset = carWidth / 2 * 0.8; // 80% of half-width (slightly more to sides)
+    
+    // Store wheel offsets for positioning
+    // X offset = left/right position, Y offset = front/back position
+    this.wheelOffsets = {
+      frontLeft: { x: -sideOffset, y: frontOffset },
+      frontRight: { x: sideOffset, y: frontOffset },
+      rearLeft: { x: -sideOffset, y: rearOffset },
+      rearRight: { x: sideOffset, y: rearOffset }
+    };
     
     // Front wheels (will rotate when steering)
     this.wheelFrontLeft = this.add.sprite(carState.x, carState.y, 'bmw_wheel');
@@ -2150,14 +2174,6 @@ class GameScene extends Phaser.Scene {
     this.wheelRearRight.setScale(wheelScale);
     this.wheelRearRight.setRotation(Math.PI / 2);
     this.wheelRearRight.setDepth(0); // Render below car
-    
-    // Store wheel offsets for positioning
-    this.wheelOffsets = {
-      frontLeft: { x: wheelOffsetX, y: -wheelOffsetY },
-      frontRight: { x: wheelOffsetX, y: wheelOffsetY },
-      rearLeft: { x: -wheelOffsetX, y: -wheelOffsetY },
-      rearRight: { x: -wheelOffsetX, y: wheelOffsetY }
-    };
     
     // Obstacles (parked cars) - use BMW 5
     this.obstacles = [];
@@ -2189,6 +2205,7 @@ class GameScene extends Phaser.Scene {
     }
     carBox.closePath();
     carBox.strokePath();
+    carBox.setVisible(false); // Hidden by default
     this.carBoundingBoxGraphics = carBox;
     
     // Draw obstacle bounding boxes (rotated)
@@ -2210,6 +2227,7 @@ class GameScene extends Phaser.Scene {
       }
       obsBox.closePath();
       obsBox.strokePath();
+      obsBox.setVisible(false); // Hidden by default
       this.obstacleBoundingBoxGraphics.push(obsBox);
     }
   }
@@ -2252,6 +2270,16 @@ class GameScene extends Phaser.Scene {
     }
   }
 
+  updateBoundingBoxVisibility() {
+    // Toggle car bounding box visibility
+    this.carBoundingBoxGraphics.setVisible(this.showBoundingBoxes);
+    
+    // Toggle obstacle bounding boxes visibility
+    for (const obsBox of this.obstacleBoundingBoxGraphics) {
+      obsBox.setVisible(this.showBoundingBoxes);
+    }
+  }
+  
   setupUI() {
     // Score display
     this.scoreText = this.add.text(10, 10, '', {
@@ -2308,8 +2336,14 @@ class GameScene extends Phaser.Scene {
     }).setOrigin(0.5);
     this.resultText.setVisible(false);
     
-    // Restart key - use one-time listener to prevent multiple restarts
-    this.input.keyboard.once('keydown-R', () => this.restart());
+    // Restart key - use regular listener for multiple restarts
+    this.input.keyboard.on('keydown-R', () => this.restart());
+    
+    // Toggle bounding boxes with B key
+    this.input.keyboard.on('keydown-B', () => {
+      this.showBoundingBoxes = !this.showBoundingBoxes;
+      this.updateBoundingBoxVisibility();
+    });
   }
 
   update(time, delta) {
@@ -2527,6 +2561,9 @@ class GameScene extends Phaser.Scene {
     this.carGraphics.setPosition(carState.x, carState.y);
     this.carGraphics.rotation = carState.angle + Math.PI / 2;
     
+    // Update wheel steering angle in physics system
+    physics.setWheelSteeringAngle(this.currentSteerAngle);
+    
     // Update wheel positions based on car position and rotation
     const carRotation = carState.angle + Math.PI / 2;
     
@@ -2558,19 +2595,29 @@ class GameScene extends Phaser.Scene {
     this.wheelRearLeft.rotation = carRotation;
     this.wheelRearRight.rotation = carRotation;
     
-    // Front wheel steering - limit to ±40 degrees
+    // Front wheel steering - gradual animation
     const maxSteerAngle = 40 * Math.PI / 180; // 40 degrees in radians
-    let steerAngle = 0;
+    const steerSpeed = 10; // Speed of steering animation (radians per second)
+    const dt = 1 / 60; // Assume 60fps for steering animation
+    
+    let targetSteerAngle = this.currentSteerAngle; // Default: keep current angle
     
     if (input.left) {
-      steerAngle = maxSteerAngle;
+      targetSteerAngle = -maxSteerAngle;
     } else if (input.right) {
-      steerAngle = -maxSteerAngle;
+      targetSteerAngle = maxSteerAngle;
+    }
+    
+    // Gradually interpolate current steering angle towards target
+    if (this.currentSteerAngle < targetSteerAngle) {
+      this.currentSteerAngle = Math.min(this.currentSteerAngle + steerSpeed * dt, targetSteerAngle);
+    } else if (this.currentSteerAngle > targetSteerAngle) {
+      this.currentSteerAngle = Math.max(this.currentSteerAngle - steerSpeed * dt, targetSteerAngle);
     }
     
     // Front wheels rotate with car angle plus steering
-    this.wheelFrontLeft.rotation = carRotation + steerAngle;
-    this.wheelFrontRight.rotation = carRotation + steerAngle;
+    this.wheelFrontLeft.rotation = carRotation + this.currentSteerAngle;
+    this.wheelFrontRight.rotation = carRotation + this.currentSteerAngle;
     
     // Update bounding boxes
     this.updateBoundingBoxes();
@@ -2621,6 +2668,8 @@ class GameScene extends Phaser.Scene {
   }
 
   restart() {
+    // Reset wheel steering angle
+    this.currentSteerAngle = 0;
     // Reset scene
     this.scene.restart();
   }
@@ -2712,5 +2761,5 @@ const config = {
 const game = new Phaser.Game(config);
 
 </script>
-<script>window.BUILD_META = {"timestamp":1776715536836,"commit":"0c05dae15e97c618eea6f680aab58744d92d4dfe","branch":"refs/heads/main"};</script></body>
+<script>window.BUILD_META = {"timestamp":1776720546051,"commit":"ebbff36b6ab94f0cd95b2e8fcdfeddde39d3461c","branch":"refs/heads/main"};</script></body>
 </html>
