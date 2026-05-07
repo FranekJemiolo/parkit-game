@@ -1,7 +1,7 @@
 {
   "name": "parkit-game",
   "version": "1.0.0",
-  "description": "A parking game where you try to park perfectly. Gets harder or easier based on how you're doing, and you can unlock different cars.",
+  "description": "A procedural parking game with adaptive difficulty and car unlocking.",
   "main": "index.html",
   "scripts": {
     "test": "node tests/testRunner.js",
