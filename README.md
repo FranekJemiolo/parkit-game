@@ -67,6 +67,106 @@ SYSTEMS
 └── ReplaySystem - Input recording & playback
 ```
 
+### Architecture Diagram
+
+```mermaid
+graph TD
+    A[Browser] --> B[ParkIt Game Engine]
+    
+    B --> C[Engine Core]
+    C --> D[Game Loop]
+    C --> E[Game Scene]
+    C --> F[System Registry]
+    
+    F --> G[Input System]
+    F --> H[Car Physics System]
+    F --> I[Parking System]
+    F --> J[Scoring System]
+    F --> K[Season System]
+    F --> L[Garage System]
+    F --> M[Content Factory]
+    F --> N[Director System]
+    F --> O[Balance System]
+    F --> P[Boss System]
+    F --> Q[Asset Manager]
+    F --> R[Audio System]
+    F --> S[Replay System]
+    
+    subgraph "Input Processing"
+        G --> T[Keyboard Handler]
+        G --> U[Mouse Handler]
+        G --> V[Touch Handler]
+    end
+    
+    subgraph "Physics Components"
+        H --> W[FWD Physics]
+        H --> X[RWD Physics]
+        H --> Y[AWD Physics]
+        H --> Z[Drivetrain Models]
+    end
+    
+    subgraph "Content Generation"
+        M --> AA[Seed RNG]
+        M --> BB[Car Pool Generation]
+        M --> CC[Boss Generation]
+        M --> DD[Level Generation]
+        AA --> EE[Deterministic Output]
+    end
+    
+    subgraph "AI Director"
+        N --> FF[Flow Personality]
+        N --> GG[Chaos Personality]
+        N --> HH[Teacher Personality]
+        N --> II[Rival Personality]
+    end
+    
+    subgraph "Seasonal Modifiers"
+        K --> JJ[Summer - Dry]
+        K --> KK[Winter - Icy]
+        K --> LL[Rain - Wet]
+        K --> MM[World Physics]
+    end
+    
+    subgraph "Asset Pipeline"
+        Q --> NN[Procedural Assets]
+        Q --> OO[Static Assets]
+        Q --> PP[GenAI Assets]
+        Q --> QQ[Three-Tier System]
+    end
+    
+    subgraph "Scoring Components"
+        J --> RR[Fuel Economy]
+        J --> SS[Move Count]
+        J --> TT[Position Accuracy]
+        J --> UU[Angle Accuracy]
+        J --> VV[Precision Bonus]
+    end
+    
+    subgraph "Progression System"
+        L --> WW[Car Unlocks]
+        L --> XX[Best Scores]
+        L --> YY[Daily Challenges]
+        L --> ZZ[Level Sharing]
+    end
+    
+    subgraph "Replay System"
+        S --> AAA[Input Recording]
+        S --> BBB[Ghost Playback]
+        S --> CCC[Run Analysis]
+    end
+    
+    subgraph "Runtime Flow"
+        AA --> K
+        K --> M
+        M --> N
+        N --> O
+        O --> D
+        D --> S
+        S --> J
+        J --> L
+    end
+```
+
 ### Runtime Flow (Critical Order)
 
 1. **Seed Generation** - Deterministic RNG initialization
